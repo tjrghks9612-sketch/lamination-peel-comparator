@@ -120,10 +120,14 @@ class SummaryBanner(QFrame):
             badge_text = "B 우세"
             tone = COLORS["b"]
             title = "조건 B가 상면 역박리 억제에 더 유리합니다"
+        elif winner == "TIE":
+            badge_text = "동률"
+            tone = COLORS["accent"]
+            title = "하면 gate와 Pareto 지표에서 두 조건이 동률입니다"
         else:
             badge_text = "판정 보류"
             tone = COLORS["warning"]
-            title = "가정 범위에서 뚜렷한 우세를 확인하지 못했습니다"
+            title = "gate 또는 Pareto 지표가 교차하여 판정을 보류합니다"
         self.badge.setText(badge_text)
         self.badge.setStyleSheet(
             f"background:{tone}22; color:{tone}; border:1px solid {tone}55; "
@@ -228,6 +232,19 @@ class ResultsView(QWidget):
         risk_layout.addWidget(self.risk_chart)
         risk_layout.addWidget(self.peel_chart)
 
+        damage_tab = QWidget()
+        damage_layout = QHBoxLayout(damage_tab)
+        damage_layout.setContentsMargins(0, 8, 0, 0)
+        damage_layout.setSpacing(8)
+        self.risk_area_chart = LineChart(
+            "Rtop 임계 초과 면적", "top_risk_area", " mm²"
+        )
+        self.damage_chart = LineChart(
+            "상면 cohesive damage 면적", "top_damage", " mm²"
+        )
+        damage_layout.addWidget(self.risk_area_chart)
+        damage_layout.addWidget(self.damage_chart)
+
         mechanics_tab = QWidget()
         mechanics_layout = QHBoxLayout(mechanics_tab)
         mechanics_layout.setContentsMargins(0, 8, 0, 0)
@@ -236,8 +253,42 @@ class ResultsView(QWidget):
         self.force_chart = LineChart("풀테이프 반력", "force", " N")
         mechanics_layout.addWidget(self.lift_chart)
         mechanics_layout.addWidget(self.force_chart)
+
+        moment_tab = QWidget()
+        moment_layout = QHBoxLayout(moment_tab)
+        moment_layout.setContentsMargins(0, 8, 0, 0)
+        moment_layout.setSpacing(8)
+        self.twist_chart = LineChart("패널 비틀림", "twist", " mm")
+        self.moment_chart = LineChart("등가 하중 모멘트", "moment", " N·mm")
+        moment_layout.addWidget(self.twist_chart)
+        moment_layout.addWidget(self.moment_chart)
+
+        command_tab = QWidget()
+        command_layout = QHBoxLayout(command_tab)
+        command_layout.setContentsMargins(0, 8, 0, 0)
+        command_layout.setSpacing(8)
+        self.speed_chart = LineChart("실제 보간 속도", "speed", " mm/s")
+        self.angle_chart = LineChart("실제 전선-파지 박리각", "peel_angle", "°")
+        command_layout.addWidget(self.speed_chart)
+        command_layout.addWidget(self.angle_chart)
+
+        force_components_tab = QWidget()
+        force_components_layout = QHBoxLayout(force_components_tab)
+        force_components_layout.setContentsMargins(0, 8, 0, 0)
+        force_components_layout.setSpacing(8)
+        self.force_x_chart = LineChart("반력 Fx", "force_x", " N")
+        self.force_y_chart = LineChart("반력 Fy", "force_y", " N")
+        self.force_z_chart = LineChart("반력 Fz", "force_z", " N")
+        force_components_layout.addWidget(self.force_x_chart)
+        force_components_layout.addWidget(self.force_y_chart)
+        force_components_layout.addWidget(self.force_z_chart)
+
         tabs.addTab(risk_tab, "위험도 · 박리")
+        tabs.addTab(damage_tab, "위험 면적 · 손상")
         tabs.addTab(mechanics_tab, "들림 · 반력")
+        tabs.addTab(moment_tab, "비틀림 · 모멘트")
+        tabs.addTab(command_tab, "속도 · 박리각")
+        tabs.addTab(force_components_tab, "Fx · Fy · Fz")
         return tabs
 
     def set_bundle(self, bundle: RunBundle) -> None:
@@ -250,7 +301,21 @@ class ResultsView(QWidget):
         self.summary.set_comparison(comparison)
         self.view_a.set_data(condition_a, result_a)
         self.view_b.set_data(condition_b, result_b)
-        for chart in (self.risk_chart, self.peel_chart, self.lift_chart, self.force_chart):
+        for chart in (
+            self.risk_chart,
+            self.peel_chart,
+            self.risk_area_chart,
+            self.damage_chart,
+            self.lift_chart,
+            self.force_chart,
+            self.twist_chart,
+            self.moment_chart,
+            self.speed_chart,
+            self.angle_chart,
+            self.force_x_chart,
+            self.force_y_chart,
+            self.force_z_chart,
+        ):
             chart.set_results(result_a, result_b)
         self._set_metric_cards(comparison, result_a, result_b)
         self.timeline.setValue(0)
@@ -262,6 +327,9 @@ class ResultsView(QWidget):
         lift_b = scalar_metric(result_b, "max_panel_lift_mm", "panel_max_lift_mm", "max_lift_mm")
         peel_a = scalar_metric(result_a, "final_bottom_peel_ratio", "bottom_peel_ratio")
         peel_b = scalar_metric(result_b, "final_bottom_peel_ratio", "bottom_peel_ratio")
+        completion_threshold = scalar_metric(
+            comparison, "bottom_completion_threshold", default=0.98
+        )
         self.risk_card.set_value(f"{_format_metric(risk_a)} / {_format_metric(risk_b)}", "낮을수록 유리")
         self.lift_card.set_value(
             f"{_format_metric(lift_a, ' mm')} / {_format_metric(lift_b, ' mm')}",
@@ -270,7 +338,7 @@ class ResultsView(QWidget):
         self.peel_card.set_value(
             f"{_format_metric(peel_a * 100 if peel_a is not None else None, '%', 1)} / "
             f"{_format_metric(peel_b * 100 if peel_b is not None else None, '%', 1)}",
-            "98% 이상이면 완료",
+            f"{(completion_threshold or 0.98) * 100:.0f}% 이상이면 완료 gate 통과",
         )
         rate_a = scalar_metric(
             comparison,
@@ -312,7 +380,16 @@ class ResultsView(QWidget):
         self.timeline_label.setText(f"{progress * 100:.0f}%")
         self.view_a.set_progress(progress)
         self.view_b.set_progress(progress)
-        for chart in (self.risk_chart, self.peel_chart, self.lift_chart, self.force_chart):
+        for chart in (
+            self.risk_chart,
+            self.peel_chart,
+            self.risk_area_chart,
+            self.damage_chart,
+            self.lift_chart,
+            self.force_chart,
+            self.twist_chart,
+            self.moment_chart,
+        ):
             chart.set_progress(progress)
 
     def _toggle_playback(self) -> None:

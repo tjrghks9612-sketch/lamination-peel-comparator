@@ -1,13 +1,16 @@
 """Headless reduced-order reverse-peel simulation.
 
-This is deliberately a comparison model rather than a calibrated FEA solver.
-It combines a Kendall-inspired peel force, a diagonal moving peel front, a
-sparse elastic plate on a PSA foundation, and an irreversible cohesive damage
-indicator.  All uncertain parameters are explicit in :class:`AssumptionSet`.
+The commanded XYZ path is an input to, rather than a substitute for, interface
+failure.  A node-wise bottom cohesive state advances from the pull-tape corner
+only when its Kendall-style energy release rate reaches the local fracture
+energy and the actuator supplies the required work.  The resulting 3-D force
+and moment load an elastic plate whose top PSA foundation loses stiffness as
+cohesive damage grows.
 """
 
 from __future__ import annotations
 
+from dataclasses import dataclass
 from hashlib import sha256
 from typing import Literal
 
@@ -15,54 +18,82 @@ import numpy as np
 from numpy.typing import NDArray
 from pydantic import BaseModel, ConfigDict, Field
 from scipy import sparse
-from scipy.sparse.linalg import factorized
+from scipy.sparse.linalg import splu
 
 from .models import AssumptionSet, Condition
-from .trajectory import interpolate_trajectory, projected_progress
+from .trajectory import interpolate_trajectory
 
 
 Resolution = Literal["coarse", "normal", "fine"]
+MODEL_VERSION = "cohesive-v3-causal"
+FloatArray = NDArray[np.float64]
 
 
 class SimulationResult(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
+    model_version: str
+    calibration_version: str
     condition_name: str
     resolution: Resolution
     input_hash: str
+    initial_state_mode: Literal["p1_equilibrium", "specified_approach"]
+    main_trajectory_start_index: int
+    trajectory_waypoint_indices: list[int]
 
     time_s: list[float]
     position_xyz_mm: list[list[float]]
     speed_mm_s: list[float]
+    trajectory_progress: list[float]
     peel_progress: list[float]
     peel_angle_deg: list[float]
     force_xyz_n: list[list[float]]
     force_resultant_n: list[float]
+    moment_xyz_n_mm: list[list[float]]
+    moment_resultant_n_mm: list[float]
+    pull_force_activation: list[float]
     bottom_peel_ratio: list[float]
     top_peak_risk: list[float]
     top_risk_area_mm2: list[float]
     top_damage_area_mm2: list[float]
+    top_min_foundation_retention: list[float]
     panel_max_lift_mm: list[float]
     panel_twist_mm: list[float]
+    bottom_damage_iterations: list[int]
+    top_damage_iterations: list[int]
+    bottom_damage_converged: list[bool]
+    top_damage_converged: list[bool]
 
     peak_top_risk: float
     peak_top_risk_time_s: float
     final_bottom_peel_ratio: float
     max_top_risk_area_mm2: float
+    max_top_damage_area_mm2: float
+    final_top_damage_area_mm2: float
+    top_risk_exceedance_duration_s: float
     max_panel_lift_mm: float
     max_panel_twist_mm: float
+    max_moment_resultant_n_mm: float
 
     mesh_shape: tuple[int, int]
     mesh_x_mm: list[float]
     mesh_y_mm: list[float]
     frame_indices: list[int]
     panel_z_frames_mm: list[list[float]]
+    bottom_damage_frames: list[list[float]]
     top_damage_frames: list[list[float]]
     front_segments_mm: list[list[float]]
     warnings: list[str] = Field(default_factory=list)
 
 
-FloatArray = NDArray[np.float64]
+@dataclass(slots=True)
+class _FrontMechanics:
+    indices: NDArray[np.intp]
+    drive_ratio: FloatArray
+    priority: FloatArray
+    force_xyz: FloatArray
+    scalar_reaction_n: float
+    peel_angle_deg: float
 
 
 def _resolution_values(
@@ -86,6 +117,18 @@ def _mesh(width: float, height: float, target_size: float) -> tuple[FloatArray, 
     return x, y, xx.ravel(), yy.ravel()
 
 
+def _nodal_areas(x: FloatArray, y: FloatArray) -> FloatArray:
+    """Trapezoidal nodal areas whose sum is the exact panel area."""
+
+    dx = float(x[1] - x[0])
+    dy = float(y[1] - y[0])
+    x_weights = np.full(len(x), dx)
+    y_weights = np.full(len(y), dy)
+    x_weights[[0, -1]] *= 0.5
+    y_weights[[0, -1]] *= 0.5
+    return np.outer(y_weights, x_weights).ravel()
+
+
 def _neumann_second_derivative(count: int, spacing: float) -> sparse.csr_matrix:
     main = np.full(count, -2.0)
     main[0] = main[-1] = -1.0
@@ -93,36 +136,52 @@ def _neumann_second_derivative(count: int, spacing: float) -> sparse.csr_matrix:
     return sparse.diags((off, main, off), (-1, 0, 1), format="csr") / spacing**2
 
 
-def _plate_factor(
+def _laplacian(x: FloatArray, y: FloatArray) -> sparse.csr_matrix:
+    lx = _neumann_second_derivative(len(x), float(x[1] - x[0]))
+    ly = _neumann_second_derivative(len(y), float(y[1] - y[0]))
+    return (
+        sparse.kron(sparse.eye(len(y), format="csr"), lx)
+        + sparse.kron(ly, sparse.eye(len(x), format="csr"))
+    ).tocsr()
+
+
+def _plate_components(
     condition: Condition,
     assumptions: AssumptionSet,
     x: FloatArray,
     y: FloatArray,
-) -> tuple[object, float, float]:
-    nx, ny = len(x), len(y)
-    dx = float(x[1] - x[0])
-    dy = float(y[1] - y[0])
-    area = dx * dy
-    lx = _neumann_second_derivative(nx, dx)
-    ly = _neumann_second_derivative(ny, dy)
-    laplacian = sparse.kron(sparse.eye(ny), lx) + sparse.kron(
-        ly, sparse.eye(nx)
-    )
-    panel_e = assumptions.panel_young_modulus_gpa * 1000.0  # N/mm^2
+    laplacian: sparse.csr_matrix,
+    nodal_areas: FloatArray,
+) -> tuple[sparse.csr_matrix, float, float]:
+    cell_area = float(x[1] - x[0]) * float(y[1] - y[0])
+    panel_e = assumptions.panel_young_modulus_gpa * 1000.0
     thickness = condition.panel.thickness_mm
     nu = assumptions.panel_poisson_ratio
-    bending = panel_e * thickness**3 / (12.0 * (1.0 - nu**2))  # N mm
+    bending = panel_e * thickness**3 / (12.0 * (1.0 - nu**2))
+    bending_matrix = (
+        bending * cell_area * (laplacian.T @ laplacian)
+    ).tocsr()
     psa_thickness = condition.top_film.psa_thickness_um / 1000.0
-    foundation = assumptions.psa_modulus_mpa / psa_thickness  # N/mm^3
-    stiffness = (
-        bending * area * (laplacian.T @ laplacian)
-        + sparse.eye(nx * ny, format="csr") * foundation * area
+    foundation = assumptions.psa_modulus_mpa / psa_thickness
+    reference_diagonal = bending_matrix.diagonal() + foundation * nodal_areas
+    regularization = max(float(reference_diagonal.max(initial=0.0)), 1.0) * 1.0e-12
+    return bending_matrix, foundation, regularization
+
+
+def _factor_top(
+    bending: sparse.csr_matrix,
+    foundation: float,
+    nodal_areas: FloatArray,
+    damage: FloatArray,
+    assumptions: AssumptionSet,
+    regularization: float,
+):
+    retention = (
+        assumptions.cohesive_stiffness_floor_ratio
+        + (1.0 - assumptions.cohesive_stiffness_floor_ratio) * (1.0 - damage)
     )
-    # Tiny regularization protects unusual user inputs without affecting the
-    # physical foundation stiffness at displayed precision.
-    regularization = max(float(stiffness.diagonal().max()), 1.0) * 1.0e-12
-    stiffness = stiffness + sparse.eye(nx * ny, format="csr") * regularization
-    return factorized(stiffness.tocsc()), foundation, area
+    diagonal = foundation * retention * nodal_areas + regularization
+    return splu((bending + sparse.diags(diagonal, format="csr")).tocsc())
 
 
 def _adhesion_energy_n_per_mm(
@@ -131,81 +190,421 @@ def _adhesion_energy_n_per_mm(
     assumptions: AssumptionSet,
     speed_mm_s: float,
 ) -> float:
-    """Infer a shared-scale fracture energy from the reported peel force.
-
-    The unknown test width/angle remain explicit assumptions.  Units are N/mm,
-    numerically equivalent to the interface energy density mJ/mm^2.
-    """
+    """Infer cohesive fracture energy from a reported peel-force value."""
 
     measured_force_n = adhesion_gf * 0.00980665
-    p = measured_force_n / assumptions.test_width_mm  # N/mm
+    line_force = measured_force_n / assumptions.test_width_mm
     angle = np.deg2rad(assumptions.test_angle_deg)
     pet_e = assumptions.pet_young_modulus_gpa * 1000.0
     pet_t = pet_thickness_um / 1000.0
-    gamma = p * (1.0 - np.cos(angle)) + p**2 / (2.0 * pet_e * pet_t)
-    speed_ratio = max(speed_mm_s, 1.0e-9) / assumptions.reference_speed_mm_s
+    gamma = line_force * (1.0 - np.cos(angle)) + line_force**2 / (
+        2.0 * pet_e * pet_t
+    )
+    effective_speed = max(speed_mm_s, assumptions.quasi_static_speed_mm_s)
+    speed_ratio = effective_speed / assumptions.reference_speed_mm_s
     return float(gamma * speed_ratio**assumptions.speed_exponent)
 
 
-def _kendall_line_force(
-    gamma: float,
-    peel_angle_rad: float,
+def _energy_release_n_per_mm(
+    line_force: FloatArray,
+    peel_angle: FloatArray,
     pet_thickness_um: float,
     assumptions: AssumptionSet,
-) -> float:
-    pet_e = assumptions.pet_young_modulus_gpa * 1000.0
-    pet_t = pet_thickness_um / 1000.0
-    extensional_stiffness = pet_e * pet_t  # N/mm
-    angular = max(1.0 - np.cos(peel_angle_rad), 0.0)
-    discriminant = (extensional_stiffness * angular) ** 2 + (
-        2.0 * extensional_stiffness * gamma
+) -> FloatArray:
+    extensional_stiffness = (
+        assumptions.pet_young_modulus_gpa
+        * 1000.0
+        * (pet_thickness_um / 1000.0)
     )
-    return float(
-        max(
-            np.sqrt(max(discriminant, 0.0))
-            - extensional_stiffness * angular,
-            0.0,
+    angular = np.maximum(1.0 - np.cos(peel_angle), 0.0)
+    stretching = (
+        assumptions.mixed_mode_shear_weight
+        * line_force**2
+        / (2.0 * extensional_stiffness)
+    )
+    return line_force * angular + stretching
+
+
+def _required_line_force(
+    gamma: float,
+    peel_angle: FloatArray,
+    pet_thickness_um: float,
+    assumptions: AssumptionSet,
+) -> FloatArray:
+    extensional_stiffness = (
+        assumptions.pet_young_modulus_gpa
+        * 1000.0
+        * (pet_thickness_um / 1000.0)
+    )
+    angular = np.maximum(1.0 - np.cos(peel_angle), 0.0)
+    quadratic = assumptions.mixed_mode_shear_weight / (
+        2.0 * extensional_stiffness
+    )
+    if quadratic > 1.0e-15:
+        discriminant = angular**2 + 4.0 * quadratic * gamma
+        return (-angular + np.sqrt(np.maximum(discriminant, 0.0))) / (
+            2.0 * quadratic
+        )
+    return np.divide(
+        gamma,
+        angular,
+        out=np.full_like(angular, np.inf),
+        where=angular > 1.0e-15,
+    )
+
+
+def _corner_distances(
+    mesh_x: FloatArray,
+    mesh_y: FloatArray,
+    width: float,
+    height: float,
+    corner: str,
+) -> tuple[FloatArray, FloatArray]:
+    local_x = width - mesh_x if "right" in corner else mesh_x
+    local_y = height - mesh_y if "top" in corner else mesh_y
+    return local_x, local_y
+
+
+def _seed_mask(
+    local_x: FloatArray,
+    local_y: FloatArray,
+    x: FloatArray,
+    y: FloatArray,
+    tape_width: float,
+) -> NDArray[np.bool_]:
+    edge_x = 0.5 * float(x[1] - x[0]) + 1.0e-12
+    edge_y = 0.5 * float(y[1] - y[0]) + 1.0e-12
+    return (
+        (local_x <= edge_x) & (local_y <= tape_width + 1.0e-12)
+    ) | (
+        (local_y <= edge_y) & (local_x <= tape_width + 1.0e-12)
+    )
+
+
+def _frontier_mask(
+    damage: FloatArray,
+    nx: int,
+    ny: int,
+    seed: NDArray[np.bool_],
+) -> NDArray[np.bool_]:
+    full = damage.reshape(ny, nx) >= 1.0 - 1.0e-10
+    partial = (damage.reshape(ny, nx) > 1.0e-12) & ~full
+    if not np.any(full) and not np.any(partial):
+        return seed.copy()
+    padded = np.pad(full, 1, mode="constant", constant_values=False)
+    adjacent = np.zeros_like(full)
+    for row_offset in range(3):
+        for column_offset in range(3):
+            if row_offset == 1 and column_offset == 1:
+                continue
+            adjacent |= padded[
+                row_offset : row_offset + ny,
+                column_offset : column_offset + nx,
+            ]
+    intact = damage.reshape(ny, nx) <= 1.0e-12
+    return (partial | (intact & adjacent)).ravel()
+
+
+def _kinematic_reach_mask(
+    local_x: FloatArray,
+    local_y: FloatArray,
+    gripper: FloatArray,
+    start_gripper: FloatArray,
+    corner: str,
+    tape_width: float,
+    assumptions: AssumptionSet,
+) -> NDArray[np.bool_]:
+    x_sign = -1.0 if "right" in corner else 1.0
+    y_sign = -1.0 if "top" in corner else 1.0
+    x_travel = max(x_sign * float(gripper[0] - start_gripper[0]), 0.0)
+    y_travel = max(y_sign * float(gripper[1] - start_gripper[1]), 0.0)
+    z_lift = max(float(gripper[2] - start_gripper[2]), 0.0)
+    vertical_reach = assumptions.vertical_front_reach_factor * z_lift
+    reach_x = tape_width + x_travel + vertical_reach
+    reach_y = tape_width + y_travel + vertical_reach
+    return (local_x <= reach_x + 1.0e-12) & (
+        local_y <= reach_y + 1.0e-12
+    )
+
+
+def _front_mechanics(
+    damage: FloatArray,
+    seed: NDArray[np.bool_],
+    kinematic_mask: NDArray[np.bool_],
+    nx: int,
+    ny: int,
+    mesh_x: FloatArray,
+    mesh_y: FloatArray,
+    nodal_areas: FloatArray,
+    gripper: FloatArray,
+    available_force_n: float,
+    gamma: float,
+    pet_thickness_um: float,
+    tape_width: float,
+    panel_diagonal: float,
+    assumptions: AssumptionSet,
+) -> _FrontMechanics:
+    frontier = _frontier_mask(damage, nx, ny, seed)
+    indices = np.flatnonzero(frontier)
+    if len(indices) == 0 or available_force_n <= 0.0:
+        return _FrontMechanics(
+            indices=indices,
+            drive_ratio=np.zeros(len(indices), dtype=float),
+            priority=np.ones(len(indices), dtype=float),
+            force_xyz=np.zeros(3, dtype=float),
+            scalar_reaction_n=0.0,
+            peel_angle_deg=0.0,
+        )
+
+    front_xyz = np.column_stack(
+        (mesh_x[indices], mesh_y[indices], np.zeros(len(indices), dtype=float))
+    )
+    vectors = gripper[None, :] - front_xyz
+    lengths = np.linalg.norm(vectors, axis=1)
+    zero_length = lengths <= 1.0e-12
+    if np.any(zero_length):
+        vectors[zero_length, 2] = 1.0
+        lengths[zero_length] = 1.0
+    unit_directions = vectors / lengths[:, None]
+    horizontal = np.linalg.norm(vectors[:, :2], axis=1)
+    angles = np.arctan2(np.abs(vectors[:, 2]), np.maximum(horizontal, 1.0e-12))
+
+    distance_xy = np.linalg.norm(vectors[:, :2], axis=1)
+    priority_scale = max(tape_width, 0.25 * panel_diagonal, 1.0e-9)
+    priority = 0.25 + 0.75 * np.exp(-distance_xy / priority_scale)
+    edge_width = np.sqrt(np.maximum(nodal_areas[indices], 1.0e-15))
+    normalization = float(np.dot(priority, edge_width))
+    available_line_force = (
+        available_force_n * priority / max(normalization, 1.0e-15)
+    )
+    release = _energy_release_n_per_mm(
+        available_line_force, angles, pet_thickness_um, assumptions
+    )
+    drive_ratio = release / max(gamma, 1.0e-15)
+    drive_ratio = np.where(kinematic_mask[indices], drive_ratio, 0.0)
+    required = _required_line_force(
+        gamma, angles, pet_thickness_um, assumptions
+    )
+    reaction_line_force = np.minimum(available_line_force, required)
+    node_force = (
+        reaction_line_force[:, None]
+        * edge_width[:, None]
+        * unit_directions
+    )
+    scalar_reaction = float(np.dot(reaction_line_force, edge_width))
+    weighted_angle = float(
+        np.rad2deg(
+            np.average(
+                angles,
+                weights=np.maximum(reaction_line_force * edge_width, 1.0e-15),
+            )
         )
     )
+    return _FrontMechanics(
+        indices=indices,
+        drive_ratio=drive_ratio,
+        priority=priority,
+        force_xyz=np.sum(node_force, axis=0),
+        scalar_reaction_n=scalar_reaction,
+        peel_angle_deg=weighted_angle,
+    )
 
 
-def _to_local_corner(
-    u: float, v: float, width: float, height: float, corner: str
+def _advance_bottom_damage(
+    damage: FloatArray,
+    mechanics: _FrontMechanics,
+    work_budget_n_mm: float,
+    gamma: float,
+    nodal_areas: FloatArray,
 ) -> tuple[float, float]:
-    x = u * width
-    y = v * height
-    if "right" in corner:
-        x = width - x
-    if "top" in corner:
-        y = height - y
-    return x, y
+    eligible = np.flatnonzero(mechanics.drive_ratio >= 1.0)
+    if len(eligible) == 0 or work_budget_n_mm <= 1.0e-15:
+        return work_budget_n_mm, 0.0
+    score = mechanics.drive_ratio[eligible] * mechanics.priority[eligible]
+    ordered = eligible[np.argsort(-score, kind="stable")]
+    changed = 0.0
+    for local_index in ordered:
+        node = int(mechanics.indices[local_index])
+        capacity = max(1.0 - float(damage[node]), 0.0)
+        if capacity <= 1.0e-15:
+            continue
+        full_cost = max(gamma * float(nodal_areas[node]), 1.0e-15)
+        increment = min(capacity, work_budget_n_mm / full_cost)
+        if increment <= 0.0:
+            break
+        damage[node] += increment
+        energy_used = increment * full_cost
+        work_budget_n_mm -= energy_used
+        changed = max(changed, increment)
+        if work_budget_n_mm <= 1.0e-15:
+            break
+    return max(work_budget_n_mm, 0.0), changed
 
 
-def _front_segment(
-    progress: float, width: float, height: float, corner: str
-) -> tuple[float, float, float, float]:
-    diagonal_level = 2.0 * float(np.clip(progress, 0.0, 1.0))
-    if diagonal_level <= 1.0:
-        local_a = (0.0, diagonal_level)
-        local_b = (diagonal_level, 0.0)
-    else:
-        local_a = (diagonal_level - 1.0, 1.0)
-        local_b = (1.0, diagonal_level - 1.0)
-    a = _to_local_corner(*local_a, width, height, corner)
-    b = _to_local_corner(*local_b, width, height, corner)
-    return (*a, *b)
+def _damage_candidate(energy_ratio: FloatArray) -> FloatArray:
+    """Top-interface softening, activated only after G/Gamma exceeds one."""
+
+    safe_ratio = np.maximum(energy_ratio, 1.0)
+    return np.where(energy_ratio > 1.0, 1.0 - 1.0 / safe_ratio, 0.0)
+
+
+def _corner_coordinate(width: float, height: float, corner: str) -> FloatArray:
+    return np.asarray(
+        (
+            width if "right" in corner else 0.0,
+            height if "top" in corner else 0.0,
+        ),
+        dtype=float,
+    )
+
+
+def _damage_front(
+    damage: FloatArray,
+    x: FloatArray,
+    y: FloatArray,
+    corner: str,
+) -> tuple[FloatArray, FloatArray]:
+    """Reduce the current damage-boundary contour to a display/load segment."""
+
+    ny, nx = len(y), len(x)
+    grid = damage.reshape(ny, nx)
+    grad_y, grad_x = np.gradient(grid, y, x, edge_order=1)
+    strength = np.hypot(grad_x, grad_y)
+    maximum = float(strength.max(initial=0.0))
+    width = float(x[-1])
+    height = float(y[-1])
+    if maximum <= 1.0e-10:
+        start = _corner_coordinate(width, height, corner)
+        point = (
+            np.asarray((width, height), dtype=float) - start
+            if float(np.mean(damage)) >= 0.5
+            else start
+        )
+        return np.asarray((*point, *point), dtype=float), point
+
+    yy, xx = np.meshgrid(y, x, indexing="ij")
+    selected = strength >= maximum * 0.15
+    points = np.column_stack((xx[selected], yy[selected]))
+    weights = strength[selected]
+    center = np.average(points, axis=0, weights=weights)
+    centered = points - center
+    covariance = (centered * weights[:, None]).T @ centered
+    if len(points) == 1 or float(np.linalg.norm(covariance)) <= 1.0e-15:
+        return np.asarray((*center, *center), dtype=float), center
+    eigenvalues, eigenvectors = np.linalg.eigh(covariance)
+    direction = eigenvectors[:, int(np.argmax(eigenvalues))]
+    projections = centered @ direction
+    first = center + direction * float(projections.min(initial=0.0))
+    second = center + direction * float(projections.max(initial=0.0))
+    first = np.clip(first, (0.0, 0.0), (width, height))
+    second = np.clip(second, (0.0, 0.0), (width, height))
+    return np.asarray((*first, *second), dtype=float), center
+
+
+def _equivalent_panel_load(
+    force_xyz: FloatArray,
+    moment_xyz: FloatArray,
+    center_xy: FloatArray,
+    mesh_x: FloatArray,
+    mesh_y: FloatArray,
+    sigma: float,
+    torsion_coupling: float,
+) -> FloatArray:
+    """Map a 3-D resultant and moment to a transverse plate load vector."""
+
+    dx = mesh_x - center_xy[0]
+    dy = mesh_y - center_xy[1]
+    weights = np.exp(-(dx**2 + dy**2) / (2.0 * sigma**2))
+    weight_sum = float(weights.sum())
+    if weight_sum <= 1.0e-15:
+        weights[int(np.argmin(dx**2 + dy**2))] = 1.0
+        weight_sum = 1.0
+    load = float(force_xyz[2]) * weights / weight_sum
+
+    def add_couple(pattern: FloatArray, lever: FloatArray, moment: float) -> None:
+        nonlocal load
+        zero_sum = pattern - weights * (float(pattern.sum()) / weight_sum)
+        denominator = float(np.dot(lever, zero_sum))
+        if abs(denominator) > 1.0e-15 and abs(moment) > 0.0:
+            load = load + moment * zero_sum / denominator
+
+    add_couple(dy * weights, dy, float(moment_xyz[0]))
+    add_couple(dx * weights, dx, -float(moment_xyz[1]))
+
+    torsion_pattern = dx * dy * weights
+    torsion_pattern -= weights * (float(torsion_pattern.sum()) / weight_sum)
+    torsion_norm = float(np.abs(torsion_pattern).sum())
+    if torsion_norm > 1.0e-15 and abs(float(moment_xyz[2])) > 0.0:
+        equivalent_force = (
+            torsion_coupling * float(moment_xyz[2]) / max(sigma, 1.0e-12)
+        )
+        load = load + equivalent_force * torsion_pattern / torsion_norm
+    return load
 
 
 def _corner_values(displacement: FloatArray, nx: int, ny: int) -> tuple[float, ...]:
     grid = displacement.reshape(ny, nx)
-    return float(grid[0, 0]), float(grid[0, -1]), float(grid[-1, 0]), float(
-        grid[-1, -1]
+    return (
+        float(grid[0, 0]),
+        float(grid[0, -1]),
+        float(grid[-1, 0]),
+        float(grid[-1, -1]),
     )
 
 
 def _input_hash(condition: Condition, assumptions: AssumptionSet, resolution: str) -> str:
-    payload = condition.model_dump_json() + assumptions.model_dump_json() + resolution
+    payload = (
+        condition.model_dump_json()
+        + assumptions.model_dump_json()
+        + resolution
+        + MODEL_VERSION
+    )
     return sha256(payload.encode("utf-8")).hexdigest()[:16]
+
+
+def _command_series(condition: Condition, requested_steps: int):
+    """Build a fixed-per-segment, P1-referenced command history."""
+
+    main_segment_count = len(condition.trajectory) - 1
+    quotient, remainder = divmod(requested_steps - 1, main_segment_count)
+    main_intervals = np.full(main_segment_count, quotient, dtype=np.int64)
+    main_intervals[:remainder] += 1
+
+    approach = condition.initial_approach
+    if approach is None:
+        combined_points = condition.trajectory
+        approach_segments = 0
+        all_intervals = main_intervals
+        initial_state_mode = "p1_equilibrium"
+    else:
+        approach_segments = len(approach) - 1
+        combined_points = [*approach[:-1], *condition.trajectory]
+        approach_intervals = np.resize(main_intervals, approach_segments)
+        all_intervals = np.concatenate((approach_intervals, main_intervals))
+        initial_state_mode = "specified_approach"
+
+    series = interpolate_trajectory(
+        combined_points,
+        segment_intervals=all_intervals,
+    )
+    main_waypoint_indices = series.waypoint_indices[
+        approach_segments : approach_segments + len(condition.trajectory)
+    ]
+    main_start_index = int(main_waypoint_indices[0])
+    time_s = series.time_s - series.time_s[main_start_index]
+    main_progress = np.clip(
+        (series.path_parameter - approach_segments) / main_segment_count,
+        0.0,
+        1.0,
+    )
+    return (
+        series,
+        time_s,
+        main_progress,
+        main_start_index,
+        main_waypoint_indices,
+        initial_state_mode,
+    )
 
 
 def simulate(
@@ -213,164 +612,359 @@ def simulate(
     assumptions: AssumptionSet,
     resolution: Resolution = "normal",
 ) -> SimulationResult:
-    """Run one deterministic reduced-order simulation.
+    """Run one deterministic stateful cohesive-zone comparison simulation."""
 
-    ``top_peak_risk`` is an assumption-normalized comparison index.  A value of
-    one means the inferred cohesive energy was reached under the selected
-    assumptions; it is not a calibrated pass/fail probability.
-    """
-
-    mesh_size, steps, requested_frames = _resolution_values(assumptions, resolution)
-    trajectory = interpolate_trajectory(condition.trajectory, samples=steps)
-    progress = projected_progress(trajectory.xyz_mm)
+    mesh_size, requested_steps, requested_frames = _resolution_values(
+        assumptions, resolution
+    )
+    (
+        trajectory,
+        time_s,
+        trajectory_progress,
+        main_start_index,
+        main_waypoint_indices,
+        initial_state_mode,
+    ) = _command_series(condition, requested_steps)
+    steps = len(trajectory.time_s)
     x, y, mesh_x, mesh_y = _mesh(
         condition.panel.width_mm, condition.panel.height_mm, mesh_size
     )
     nx, ny = len(x), len(y)
-    solve_plate, foundation, nodal_area = _plate_factor(
-        condition, assumptions, x, y
+    node_count = nx * ny
+    nodal_areas = _nodal_areas(x, y)
+    panel_area = float(nodal_areas.sum())
+    panel_diagonal = float(
+        np.hypot(condition.panel.width_mm, condition.panel.height_mm)
     )
+    laplacian = _laplacian(x, y)
+    bending, top_foundation, top_regularization = _plate_components(
+        condition, assumptions, x, y, laplacian, nodal_areas
+    )
+
+    bottom_damage = np.zeros(node_count, dtype=float)
+    top_damage = np.zeros(node_count, dtype=float)
+    top_solver = _factor_top(
+        bending,
+        top_foundation,
+        nodal_areas,
+        top_damage,
+        assumptions,
+        top_regularization,
+    )
+
+    tape_width = condition.pull_tape.width_mm * assumptions.grip_scale
+    local_x, local_y = _corner_distances(
+        mesh_x,
+        mesh_y,
+        condition.panel.width_mm,
+        condition.panel.height_mm,
+        condition.pull_tape.start_corner,
+    )
+    seed = _seed_mask(local_x, local_y, x, y, tape_width)
+    approach_start_gripper = trajectory.xyz_mm[0].copy()
+    p1_gripper = trajectory.xyz_mm[main_start_index].copy()
 
     frame_indices = np.unique(
         np.linspace(0, steps - 1, min(requested_frames, steps), dtype=int)
     )
     frame_lookup = set(int(index) for index in frame_indices)
     panel_frames: list[list[float]] = []
-    damage_frames: list[list[float]] = []
+    bottom_damage_frames: list[list[float]] = []
+    top_damage_frames: list[list[float]] = []
 
     force_xyz = np.zeros((steps, 3), dtype=float)
     force_resultant = np.zeros(steps, dtype=float)
+    moment_xyz = np.zeros((steps, 3), dtype=float)
+    moment_resultant = np.zeros(steps, dtype=float)
+    force_activation = np.ones(steps, dtype=float)
     peel_angles = np.zeros(steps, dtype=float)
+    bottom_ratio = np.zeros(steps, dtype=float)
     peak_risk = np.zeros(steps, dtype=float)
     risk_area = np.zeros(steps, dtype=float)
     damage_area = np.zeros(steps, dtype=float)
+    min_foundation_retention = np.ones(steps, dtype=float)
     max_lift = np.zeros(steps, dtype=float)
     twist = np.zeros(steps, dtype=float)
-    damage = np.zeros(nx * ny, dtype=float)
     fronts = np.zeros((steps, 4), dtype=float)
+    bottom_iterations = np.ones(steps, dtype=int)
+    top_iterations = np.ones(steps, dtype=int)
+    bottom_converged = np.ones(steps, dtype=bool)
+    top_converged = np.ones(steps, dtype=bool)
 
-    width = condition.panel.width_mm
-    height = condition.panel.height_mm
-    corner = condition.pull_tape.start_corner
-    tape_width = condition.pull_tape.width_mm * assumptions.grip_scale
+    tolerance = assumptions.damage_convergence_tolerance
+    max_iterations = assumptions.damage_max_iterations
 
     for index in range(steps):
-        front = _front_segment(progress[index], width, height, corner)
-        fronts[index] = front
-        center_x = 0.5 * (front[0] + front[2])
-        center_y = 0.5 * (front[1] + front[3])
         gripper = trajectory.xyz_mm[index]
-        direction = gripper - np.asarray((center_x, center_y, 0.0))
-        direction_norm = float(np.linalg.norm(direction))
-        if direction_norm <= 1.0e-12:
-            if index + 1 < steps:
-                direction = trajectory.xyz_mm[index + 1] - gripper
-            elif index:
-                direction = gripper - trajectory.xyz_mm[index - 1]
-            direction_norm = max(float(np.linalg.norm(direction)), 1.0e-12)
-        unit_direction = direction / direction_norm
-        horizontal = float(np.linalg.norm(direction[:2]))
-        angle = float(np.arctan2(abs(direction[2]), max(horizontal, 1.0e-12)))
-        peel_angles[index] = np.rad2deg(angle)
-
+        previous_gripper = (
+            trajectory.xyz_mm[index - 1] if index else trajectory.xyz_mm[0]
+        )
+        path_increment = float(np.linalg.norm(gripper - previous_gripper))
+        # P1 is a held, tape-attached equilibrium state.  Unknown pre-P1 motion
+        # is never inferred from P1's absolute Z, so the actuator capacity is
+        # present at t=0 while zero path increment prevents artificial damage.
+        available_force = assumptions.max_pull_force_n
+        reach_origin = (
+            approach_start_gripper if index < main_start_index else p1_gripper
+        )
+        kinematic_mask = _kinematic_reach_mask(
+            local_x,
+            local_y,
+            gripper,
+            reach_origin,
+            condition.pull_tape.start_corner,
+            tape_width,
+            assumptions,
+        )
         gamma_bottom = _adhesion_energy_n_per_mm(
             condition.bottom_film.adhesion_gf,
             condition.bottom_film.pet_thickness_um,
             assumptions,
             trajectory.speed_mm_s[index],
         )
-        line_force = _kendall_line_force(
+        mechanics = _front_mechanics(
+            bottom_damage,
+            seed,
+            kinematic_mask,
+            nx,
+            ny,
+            mesh_x,
+            mesh_y,
+            nodal_areas,
+            gripper,
+            available_force,
             gamma_bottom,
-            angle,
             condition.bottom_film.pet_thickness_um,
+            tape_width,
+            panel_diagonal,
             assumptions,
         )
-        front_width = float(np.hypot(front[2] - front[0], front[3] - front[1]))
-        effective_width = max(front_width, tape_width * (1.0 - progress[index]))
-        # Initial Z lift can open the corner before there is measurable XY
-        # progress, so activation follows actual gripper displacement from P1.
-        # Only the fully detached end is faded by projected peel progress.
-        start_travel = float(
-            np.linalg.norm(gripper - trajectory.xyz_mm[0])
-        )
-        start_activation = np.clip(
-            start_travel / max(0.5, 0.1 * tape_width), 0.0, 1.0
-        )
-        end_activation = np.clip((1.0 - progress[index]) / 0.02, 0.0, 1.0)
-        total_force = line_force * effective_width * start_activation * end_activation
-        force_xyz[index] = total_force * unit_direction
-        force_resultant[index] = total_force
-
-        vertical_load = max(float(force_xyz[index, 2]), 0.0)
-        sigma = max(tape_width * 0.5, mesh_size * 1.5)
-        weights = np.exp(
-            -((mesh_x - center_x) ** 2 + (mesh_y - center_y) ** 2)
-            / (2.0 * sigma**2)
-        )
-        weight_sum = float(weights.sum())
-        if weight_sum <= 1.0e-15 or vertical_load <= 0.0:
-            displacement = np.zeros(nx * ny, dtype=float)
+        work_remaining = mechanics.scalar_reaction_n * path_increment
+        converged = True
+        for iteration in range(1, max_iterations + 1):
+            bottom_iterations[index] = iteration
+            work_remaining, changed = _advance_bottom_damage(
+                bottom_damage,
+                mechanics,
+                work_remaining,
+                gamma_bottom,
+                nodal_areas,
+            )
+            if changed <= tolerance or work_remaining <= 1.0e-15:
+                break
+            mechanics = _front_mechanics(
+                bottom_damage,
+                seed,
+                kinematic_mask,
+                nx,
+                ny,
+                mesh_x,
+                mesh_y,
+                nodal_areas,
+                gripper,
+                available_force,
+                gamma_bottom,
+                condition.bottom_film.pet_thickness_um,
+                tape_width,
+                panel_diagonal,
+                assumptions,
+            )
+            if not np.any(mechanics.drive_ratio >= 1.0):
+                break
         else:
-            load = vertical_load * weights / weight_sum
-            displacement = np.asarray(solve_plate(load), dtype=float)
-            displacement = np.maximum(displacement, 0.0)
+            mechanics = _front_mechanics(
+                bottom_damage,
+                seed,
+                kinematic_mask,
+                nx,
+                ny,
+                mesh_x,
+                mesh_y,
+                nodal_areas,
+                gripper,
+                available_force,
+                gamma_bottom,
+                condition.bottom_film.pet_thickness_um,
+                tape_width,
+                panel_diagonal,
+                assumptions,
+            )
+            converged = not (
+                work_remaining > 1.0e-15
+                and np.any(mechanics.drive_ratio >= 1.0)
+            )
+        bottom_converged[index] = converged
 
+        mechanics = _front_mechanics(
+            bottom_damage,
+            seed,
+            kinematic_mask,
+            nx,
+            ny,
+            mesh_x,
+            mesh_y,
+            nodal_areas,
+            gripper,
+            available_force,
+            gamma_bottom,
+            condition.bottom_film.pet_thickness_um,
+            tape_width,
+            panel_diagonal,
+            assumptions,
+        )
+        force = mechanics.force_xyz
+        force_xyz[index] = force
+        force_resultant[index] = float(np.linalg.norm(force))
+        peel_angles[index] = mechanics.peel_angle_deg
+        bottom_ratio[index] = float(
+            np.clip(np.dot(bottom_damage, nodal_areas) / panel_area, 0.0, 1.0)
+        )
+
+        front, front_center = _damage_front(
+            bottom_damage, x, y, condition.pull_tape.start_corner
+        )
+        fronts[index] = front
+        front_xyz = np.asarray((*front_center, 0.0), dtype=float)
+        lever = gripper - front_xyz
+        surface_offset = np.asarray(
+            (0.0, 0.0, -0.5 * condition.panel.thickness_mm), dtype=float
+        )
+        applied_moment = np.cross(lever, force) + np.cross(
+            surface_offset, force
+        )
+        moment_xyz[index] = applied_moment
+        moment_resultant[index] = float(np.linalg.norm(applied_moment))
+
+        sigma = max(tape_width * 0.5, mesh_size * 1.5)
+        panel_load = _equivalent_panel_load(
+            force,
+            applied_moment,
+            front_center,
+            mesh_x,
+            mesh_y,
+            sigma,
+            assumptions.torsion_coupling,
+        )
         gamma_top = _adhesion_energy_n_per_mm(
             condition.top_film.adhesion_gf,
             condition.top_film.pet_thickness_um,
             assumptions,
             trajectory.speed_mm_s[index],
         )
-        local_risk = 0.5 * foundation * displacement**2 / max(gamma_top, 1.0e-15)
+
+        displacement = np.zeros(node_count, dtype=float)
+        local_risk = np.zeros(node_count, dtype=float)
+        converged = False
+        for iteration in range(1, max_iterations + 1):
+            displacement = np.asarray(top_solver.solve(panel_load), dtype=float)
+            opening = np.maximum(displacement, 0.0)
+            top_energy = 0.5 * top_foundation * opening**2
+            local_risk = top_energy / max(gamma_top, 1.0e-15)
+            candidate = np.maximum(top_damage, _damage_candidate(local_risk))
+            change = float(np.max(candidate - top_damage, initial=0.0))
+            top_iterations[index] = iteration
+            if change <= tolerance:
+                converged = True
+                break
+            top_damage = candidate
+            top_solver = _factor_top(
+                bending,
+                top_foundation,
+                nodal_areas,
+                top_damage,
+                assumptions,
+                top_regularization,
+            )
+        if not converged:
+            displacement = np.asarray(top_solver.solve(panel_load), dtype=float)
+            opening = np.maximum(displacement, 0.0)
+            top_energy = 0.5 * top_foundation * opening**2
+            local_risk = top_energy / max(gamma_top, 1.0e-15)
+        top_converged[index] = converged
+
         peak_risk[index] = float(local_risk.max(initial=0.0))
-        risk_area[index] = float(np.count_nonzero(local_risk >= 1.0) * nodal_area)
-        separation_ratio = np.sqrt(np.maximum(local_risk, 0.0))
-        candidate_damage = np.clip((separation_ratio - 0.8) / 0.2, 0.0, 1.0)
-        damage = np.maximum(damage, candidate_damage)
-        damage_area[index] = float(np.count_nonzero(damage > 0.0) * nodal_area)
-        max_lift[index] = float(displacement.max(initial=0.0))
+        risk_area[index] = float(
+            np.dot((local_risk >= 1.0).astype(float), nodal_areas)
+        )
+        damage_area[index] = float(np.dot(top_damage, nodal_areas))
+        top_retention = (
+            assumptions.cohesive_stiffness_floor_ratio
+            + (1.0 - assumptions.cohesive_stiffness_floor_ratio)
+            * (1.0 - top_damage)
+        )
+        min_foundation_retention[index] = float(top_retention.min(initial=1.0))
+        max_lift[index] = float(np.maximum(displacement, 0.0).max(initial=0.0))
         bl, br, tl, tr = _corner_values(displacement, nx, ny)
         twist[index] = abs((bl + tr) - (br + tl)) * 0.5
 
         if index in frame_lookup:
             panel_frames.append(displacement.tolist())
-            damage_frames.append(damage.tolist())
+            bottom_damage_frames.append(bottom_damage.tolist())
+            top_damage_frames.append(top_damage.tolist())
 
     peak_index = int(np.argmax(peak_risk))
+    exceedance_duration = float(
+        np.trapezoid((peak_risk >= 1.0).astype(float), time_s)
+    )
     warnings = [
-        "상대 비교용 축약 모델이며 실제 불량률 또는 안전 판정이 아닙니다.",
-        "하면 필름 곡면과 박리 전선은 대각선 기구학 근사입니다.",
-        "gf 시험 폭·각도·속도가 불명확하면 절대 힘과 위험도 크기는 보정되지 않습니다.",
+        "이 결과는 보정 전 상대 비교용 축약 모델이며 실제 불량률 또는 안전 판정이 아닙니다.",
+        "하면 박리는 노드별 에너지·일·연결성 기준, 상면은 손상 연성 Winkler 기초로 근사합니다.",
+        "gf 시험 폭·각도·속도와 최대 인장력 가정을 실제 계측값으로 보정해야 합니다.",
+        "Z는 패널 표면 Z=0 기준 절대 좌표이며 P1은 테이프 부착 후 정적 평형으로 해석합니다.",
     ]
+    if not bool(np.all(bottom_converged)):
+        warnings.append("일부 시간 단계에서 하면 손상 전파가 설정된 최대 반복 횟수에 도달했습니다.")
+    if not bool(np.all(top_converged)):
+        warnings.append("일부 시간 단계에서 상면 손상-강성 반복이 설정된 최대 횟수 안에 수렴하지 않았습니다.")
+
     return SimulationResult(
+        model_version=MODEL_VERSION,
+        calibration_version=assumptions.calibration_version,
         condition_name=condition.name,
         resolution=resolution,
         input_hash=_input_hash(condition, assumptions, resolution),
-        time_s=trajectory.time_s.tolist(),
+        initial_state_mode=initial_state_mode,
+        main_trajectory_start_index=main_start_index,
+        trajectory_waypoint_indices=main_waypoint_indices.tolist(),
+        time_s=time_s.tolist(),
         position_xyz_mm=trajectory.xyz_mm.tolist(),
         speed_mm_s=trajectory.speed_mm_s.tolist(),
-        peel_progress=progress.tolist(),
+        trajectory_progress=trajectory_progress.tolist(),
+        peel_progress=bottom_ratio.tolist(),
         peel_angle_deg=peel_angles.tolist(),
         force_xyz_n=force_xyz.tolist(),
         force_resultant_n=force_resultant.tolist(),
-        bottom_peel_ratio=progress.tolist(),
+        moment_xyz_n_mm=moment_xyz.tolist(),
+        moment_resultant_n_mm=moment_resultant.tolist(),
+        pull_force_activation=force_activation.tolist(),
+        bottom_peel_ratio=bottom_ratio.tolist(),
         top_peak_risk=peak_risk.tolist(),
         top_risk_area_mm2=risk_area.tolist(),
         top_damage_area_mm2=damage_area.tolist(),
+        top_min_foundation_retention=min_foundation_retention.tolist(),
         panel_max_lift_mm=max_lift.tolist(),
         panel_twist_mm=twist.tolist(),
+        bottom_damage_iterations=bottom_iterations.tolist(),
+        top_damage_iterations=top_iterations.tolist(),
+        bottom_damage_converged=bottom_converged.tolist(),
+        top_damage_converged=top_converged.tolist(),
         peak_top_risk=float(peak_risk[peak_index]),
-        peak_top_risk_time_s=float(trajectory.time_s[peak_index]),
-        final_bottom_peel_ratio=float(progress[-1]),
+        peak_top_risk_time_s=float(time_s[peak_index]),
+        final_bottom_peel_ratio=float(bottom_ratio[-1]),
         max_top_risk_area_mm2=float(risk_area.max(initial=0.0)),
+        max_top_damage_area_mm2=float(damage_area.max(initial=0.0)),
+        final_top_damage_area_mm2=float(damage_area[-1]),
+        top_risk_exceedance_duration_s=exceedance_duration,
         max_panel_lift_mm=float(max_lift.max(initial=0.0)),
         max_panel_twist_mm=float(twist.max(initial=0.0)),
+        max_moment_resultant_n_mm=float(moment_resultant.max(initial=0.0)),
         mesh_shape=(ny, nx),
         mesh_x_mm=mesh_x.tolist(),
         mesh_y_mm=mesh_y.tolist(),
         frame_indices=frame_indices.tolist(),
         panel_z_frames_mm=panel_frames,
-        top_damage_frames=damage_frames,
+        bottom_damage_frames=bottom_damage_frames,
+        top_damage_frames=top_damage_frames,
         front_segments_mm=fronts.tolist(),
         warnings=warnings,
     )

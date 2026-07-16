@@ -247,7 +247,9 @@ class PeelView(QWidget):
             "start_corner",
             default="bottom_left",
         )
-        p1, p2 = self._front_line(rect, peel, str(corner))
+        p1, p2 = self._result_front_line(
+            rect, width_mm, height_mm, peel, str(corner)
+        )
         current_xyz = self._trajectory_position(self._trajectory(), self.progress)
         grip = self._map_xy(current_xyz[0], current_xyz[1], rect, width_mm, height_mm)
         z_scale = min(34.0, abs(current_xyz[2]) * 1.5)
@@ -348,7 +350,7 @@ class PeelView(QWidget):
 
     @staticmethod
     def _front_line(rect: QRectF, progress: float, corner: str) -> tuple[QPointF, QPointF]:
-        # A diagonal iso-line moving from the selected start corner to its opposite.
+        # Compatibility fallback for result files created by the v1 solver.
         s = max(0.001, min(1.999, progress * 2.0))
         coordinates: list[tuple[float, float]] = []
         if s <= 1:
@@ -363,6 +365,47 @@ class PeelView(QWidget):
                 y = 1 - y
             transformed.append(QPointF(rect.left() + x * rect.width(), rect.bottom() - y * rect.height()))
         return transformed[0], transformed[1]
+
+    def _result_front_line(
+        self,
+        rect: QRectF,
+        width_mm: float,
+        height_mm: float,
+        peel: float,
+        corner: str,
+    ) -> tuple[QPointF, QPointF]:
+        segments = sequence(
+            get_value(
+                self.result,
+                "front_segments_mm",
+                "peel_front_segments",
+                default=[],
+            )
+        )
+        if segments:
+            index = min(
+                len(segments) - 1,
+                round(self.progress * (len(segments) - 1)),
+            )
+            segment = sequence(segments[index])
+            if len(segment) >= 4:
+                return (
+                    self._map_xy(
+                        _float(segment[0]),
+                        _float(segment[1]),
+                        rect,
+                        width_mm,
+                        height_mm,
+                    ),
+                    self._map_xy(
+                        _float(segment[2]),
+                        _float(segment[3]),
+                        rect,
+                        width_mm,
+                        height_mm,
+                    ),
+                )
+        return self._front_line(rect, peel, corner)
 
     def _frame_grid(self, *names: str) -> list[list[float]]:
         frames = sequence(get_value(self.result, *names, default=[]))

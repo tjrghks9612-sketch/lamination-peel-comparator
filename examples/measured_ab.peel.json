@@ -1,0 +1,27 @@
+{
+  "schema_version": "1.0",
+  "condition_a": {
+    "name": "Condition A",
+    "trajectory": [
+      {"x_mm": 0.0, "y_mm": 0.0, "z_mm": 4.0, "speed_mm_s": 0.0},
+      {"x_mm": 6.5, "y_mm": 7.5, "z_mm": 4.0, "speed_mm_s": 50.0},
+      {"x_mm": 13.0, "y_mm": 15.0, "z_mm": 4.0, "speed_mm_s": 30.0},
+      {"x_mm": 13.0, "y_mm": 25.0, "z_mm": 4.0, "speed_mm_s": 30.0},
+      {"x_mm": 13.0, "y_mm": 75.0, "z_mm": 15.0, "speed_mm_s": 200.0},
+      {"x_mm": 26.0, "y_mm": 250.0, "z_mm": 46.0, "speed_mm_s": 500.0}
+    ]
+  },
+  "condition_b": {
+    "name": "Condition B",
+    "trajectory": [
+      {"x_mm": 0.0, "y_mm": 0.0, "z_mm": 14.0, "speed_mm_s": 0.0},
+      {"x_mm": 6.5, "y_mm": 7.5, "z_mm": 14.0, "speed_mm_s": 5.0},
+      {"x_mm": 13.0, "y_mm": 15.0, "z_mm": 14.0, "speed_mm_s": 5.0},
+      {"x_mm": 13.0, "y_mm": 25.0, "z_mm": 14.0, "speed_mm_s": 20.0},
+      {"x_mm": 13.0, "y_mm": 75.0, "z_mm": 25.0, "speed_mm_s": 20.0},
+      {"x_mm": 13.0, "y_mm": 315.0, "z_mm": 56.0, "speed_mm_s": 500.0}
+    ]
+  },
+  "assumptions": {},
+  "run_uncertainty": false
+}

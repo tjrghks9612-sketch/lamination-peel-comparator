@@ -23,7 +23,7 @@ def test_condition_requires_exactly_six_distinct_points() -> None:
         type(condition).model_validate(data)
 
 
-def test_piecewise_linear_trajectory_uses_start_point_segment_speed() -> None:
+def test_piecewise_linear_trajectory_uses_waypoint_target_speeds() -> None:
     condition = default_condition()
     expected_times = waypoint_times(condition.trajectory)
     series = interpolate_trajectory(condition.trajectory, samples=51)
@@ -37,7 +37,12 @@ def test_piecewise_linear_trajectory_uses_start_point_segment_speed() -> None:
         )
     )
     assert expected_times[1] == pytest.approx(
-        first_distance / condition.trajectory[0].speed_mm_s
+        2.0
+        * first_distance
+        / (
+            condition.trajectory[0].speed_mm_s
+            + condition.trajectory[1].speed_mm_s
+        )
     )
     assert series.xyz_mm[0].tolist() == pytest.approx(
         [
@@ -73,24 +78,24 @@ def test_simulation_is_deterministic_and_damage_is_irreversible() -> None:
     assert len(first.panel_z_frames_mm[0]) == first.mesh_shape[0] * first.mesh_shape[1]
 
 
-def test_initial_vertical_lift_is_not_suppressed_by_zero_xy_progress() -> None:
+def test_absolute_p1_height_changes_initial_equilibrium() -> None:
     low = default_condition()
     high = low.model_copy(deep=True)
-    for condition, z_mm in ((low, 0.1), (high, 10.0)):
-        condition.trajectory[1].x_mm = condition.trajectory[0].x_mm
-        condition.trajectory[1].y_mm = condition.trajectory[0].y_mm
-        condition.trajectory[1].z_mm = z_mm
-    low_result = simulate(low, AssumptionSet(), "normal")
-    high_result = simulate(high, AssumptionSet(), "normal")
-    high_zero_progress_risk = max(
-        risk
-        for risk, progress in zip(
-            high_result.top_peak_risk, high_result.peel_progress
-        )
-        if abs(progress) <= 1.0e-12
+    for point in low.trajectory:
+        point.z_mm += 4.0
+    for point in high.trajectory:
+        point.z_mm += 14.0
+    low_result = simulate(low, AssumptionSet(), "coarse")
+    high_result = simulate(high, AssumptionSet(), "coarse")
+
+    assert low_result.position_xyz_mm[0][2] == pytest.approx(4.0)
+    assert high_result.position_xyz_mm[0][2] == pytest.approx(14.0)
+    assert high_result.peel_angle_deg[0] != pytest.approx(
+        low_result.peel_angle_deg[0]
     )
-    assert high_zero_progress_risk > 0.0
-    assert high_result.peak_top_risk != low_result.peak_top_risk
+    assert high_result.force_xyz_n[0][2] != pytest.approx(
+        low_result.force_xyz_n[0][2]
+    )
 
 
 def test_identical_conditions_compare_as_tie() -> None:
@@ -107,12 +112,11 @@ def test_identical_conditions_compare_as_tie() -> None:
 def test_swapping_conditions_swaps_the_winner() -> None:
     project = default_project()
     project.run_uncertainty = False
-    altered = project.condition_b
-    for index, point in enumerate(altered.trajectory[1:-1], start=1):
-        point.x_mm = altered.panel.width_mm * min(1.0, index * 0.25)
-        point.y_mm = altered.panel.height_mm * min(1.0, index * 0.05)
+    project.condition_b.bottom_film.adhesion_gf *= 10.0
     forward = compare(project)
     assert forward.winner == "a"
+    assert forward.bottom_gate_pass_a
+    assert not forward.bottom_gate_pass_b
     project.condition_a, project.condition_b = project.condition_b, project.condition_a
     reverse = compare(project)
     assert reverse.winner == "b"

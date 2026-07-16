@@ -31,6 +31,24 @@ PANEL_PRESETS: dict[str, dict[str, float | str]] = {
     },
 }
 
+MEASURED_TRAJECTORY_A = (
+    (0.0, 0.0, 4.0, 0.0),
+    (6.5, 7.5, 4.0, 50.0),
+    (13.0, 15.0, 4.0, 30.0),
+    (13.0, 25.0, 4.0, 30.0),
+    (13.0, 75.0, 15.0, 200.0),
+    (26.0, 250.0, 46.0, 500.0),
+)
+
+MEASURED_TRAJECTORY_B = (
+    (0.0, 0.0, 14.0, 0.0),
+    (6.5, 7.5, 14.0, 5.0),
+    (13.0, 15.0, 14.0, 5.0),
+    (13.0, 25.0, 14.0, 20.0),
+    (13.0, 75.0, 25.0, 20.0),
+    (13.0, 315.0, 56.0, 500.0),
+)
+
 
 def panel_from_preset(name: str = "pro", **overrides: float | str) -> PanelConfig:
     if name not in PANEL_PRESETS:
@@ -96,3 +114,22 @@ def default_project() -> ProjectV1:
     condition_b.name = "Condition B"
     return ProjectV1(condition_a=condition_a, condition_b=condition_b)
 
+
+def measured_project() -> ProjectV1:
+    """Return the supplied A/B machine trajectories without Z normalization."""
+
+    condition_a = default_condition("Condition A")
+    condition_b = default_condition("Condition B")
+    condition_a.trajectory = [
+        TrajectoryPoint(x_mm=x, y_mm=y, z_mm=z, speed_mm_s=speed)
+        for x, y, z, speed in MEASURED_TRAJECTORY_A
+    ]
+    condition_b.trajectory = [
+        TrajectoryPoint(x_mm=x, y_mm=y, z_mm=z, speed_mm_s=speed)
+        for x, y, z, speed in MEASURED_TRAJECTORY_B
+    ]
+    return ProjectV1(
+        condition_a=condition_a,
+        condition_b=condition_b,
+        run_uncertainty=False,
+    )

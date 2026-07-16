@@ -143,6 +143,8 @@ def sequence(value: Any) -> list[Any]:
 
 SERIES_ALIASES: dict[str, tuple[str, ...]] = {
     "time": ("time_s", "times_s", "time", "times"),
+    "speed": ("speed_mm_s", "actual_speed_mm_s", "speed"),
+    "peel_angle": ("peel_angle_deg", "peel_angle", "angle_deg"),
     "top_risk": (
         "top_risk",
         "top_peak_risk",
@@ -170,11 +172,50 @@ SERIES_ALIASES: dict[str, tuple[str, ...]] = {
         "force",
     ),
     "twist": ("panel_twist_mm", "twist_history_mm", "panel_twist", "twist"),
+    "top_risk_area": ("top_risk_area_mm2", "risk_area_history_mm2"),
+    "top_damage": ("top_damage_area_mm2", "damage_area_history_mm2"),
+    "moment": (
+        "moment_resultant_n_mm",
+        "moment_history_n_mm",
+        "pull_moment_n_mm",
+    ),
+}
+
+VECTOR_SERIES: dict[str, tuple[tuple[str, ...], int]] = {
+    "position_x": (("position_xyz_mm", "position_mm"), 0),
+    "position_y": (("position_xyz_mm", "position_mm"), 1),
+    "position_z": (("position_xyz_mm", "position_mm"), 2),
+    "force_x": (("force_xyz_n", "reaction_force_xyz_n"), 0),
+    "force_y": (("force_xyz_n", "reaction_force_xyz_n"), 1),
+    "force_z": (("force_xyz_n", "reaction_force_xyz_n"), 2),
 }
 
 
 def result_series(result: Any, key: str) -> list[float]:
     """Extract a numeric series from mapping, object, metrics, or frame records."""
+
+    vector_spec = VECTOR_SERIES.get(key)
+    if vector_spec is not None:
+        aliases, component = vector_spec
+        for container in (
+            result,
+            get_value(result, "history", "histories"),
+            get_value(result, "metrics", "series"),
+        ):
+            vectors = sequence(get_value(container, *aliases, default=[]))
+            values: list[float] = []
+            for vector in vectors:
+                items = sequence(vector)
+                if len(items) <= component:
+                    values = []
+                    break
+                number = _to_number(items[component])
+                if number is None:
+                    values = []
+                    break
+                values.append(number)
+            if values:
+                return values
 
     aliases = SERIES_ALIASES.get(key, (key,))
     containers = [
@@ -226,4 +267,3 @@ def _to_number(value: Any) -> float | None:
         return float(value)
     except (TypeError, ValueError):
         return None
-

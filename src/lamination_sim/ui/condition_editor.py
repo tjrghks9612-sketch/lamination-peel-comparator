@@ -72,6 +72,7 @@ class ConditionEditor(QWidget):
         self.label = label
         self.accent = accent
         self._loading = False
+        self._initial_approach: list[dict[str, float]] | None = None
 
         root = QVBoxLayout(self)
         root.setContentsMargins(0, 0, 0, 0)
@@ -187,7 +188,10 @@ class ConditionEditor(QWidget):
         box = QGroupBox("박리 궤적 · 시작점 포함 6개")
         layout = QVBoxLayout(box)
         helper_row = QHBoxLayout()
-        helper = QLabel("각 점의 속도는 해당 점에서 다음 점까지의 구간 속도입니다. P6 속도는 저장만 됩니다.")
+        helper = QLabel(
+            "속도는 각 waypoint의 목표속도입니다. 포인트 사이에서 선형 보간하며 "
+            "P1=0은 정지 출발로 허용됩니다. Z는 패널 표면(Z=0) 기준 절대값입니다."
+        )
         helper.setWordWrap(True)
         helper.setProperty("dim", True)
         import_button = QPushButton("CSV 불러오기")
@@ -325,8 +329,8 @@ class ConditionEditor(QWidget):
                 except ValueError as exc:
                     raise ValueError(f"조건 {self.label} P{row + 1}의 값이 숫자가 아닙니다: {text}") from exc
                 values.append(value)
-            if values[3] <= 0:
-                raise ValueError(f"조건 {self.label} P{row + 1} 속도는 0보다 커야 합니다.")
+            if values[3] < 0:
+                raise ValueError(f"조건 {self.label} P{row + 1} 속도는 음수일 수 없습니다.")
             trajectory.append(
                 {
                     "x_mm": values[0],
@@ -335,7 +339,7 @@ class ConditionEditor(QWidget):
                     "speed_mm_s": values[3],
                 }
             )
-        return {
+        payload = {
             "name": f"Condition {self.label}",
             "panel": {
                 "preset": self.panel_preset.currentData(),
@@ -361,10 +365,29 @@ class ConditionEditor(QWidget):
             },
             "trajectory": trajectory,
         }
+        if self._initial_approach is not None:
+            payload["initial_approach"] = self._initial_approach
+        return payload
 
     def set_condition(self, condition: Any) -> None:
         self._loading = True
         try:
+            approach = get_value(condition, "initial_approach", default=None)
+            self._initial_approach = (
+                [
+                    {
+                        "x_mm": float(get_value(point, "x_mm", "x", default=0)),
+                        "y_mm": float(get_value(point, "y_mm", "y", default=0)),
+                        "z_mm": float(get_value(point, "z_mm", "z", default=0)),
+                        "speed_mm_s": float(
+                            get_value(point, "speed_mm_s", "speed", default=0)
+                        ),
+                    }
+                    for point in sequence(approach)
+                ]
+                if approach is not None
+                else None
+            )
             panel = get_value(condition, "panel", default={})
             preset = str(get_value(panel, "preset", default="pro"))
             index = self.panel_preset.findData(preset)
@@ -419,4 +442,8 @@ class ConditionEditor(QWidget):
         payload = source.condition_payload()
         current = self.condition_payload()
         payload["trajectory"] = current["trajectory"]
+        if "initial_approach" in current:
+            payload["initial_approach"] = current["initial_approach"]
+        else:
+            payload.pop("initial_approach", None)
         self.set_condition(payload)

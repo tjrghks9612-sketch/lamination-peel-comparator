@@ -47,11 +47,22 @@ def export_comparison_csv(bundle_or_comparison: Any, path: str | Path) -> Path:
     destination.parent.mkdir(parents=True, exist_ok=True)
     keys = (
         ("time", "time_s"),
+        ("position_x", "grip_x_mm"),
+        ("position_y", "grip_y_mm"),
+        ("position_z", "grip_z_mm"),
+        ("speed", "actual_speed_mm_s"),
+        ("peel_angle", "peel_angle_deg"),
+        ("force_x", "force_x_n"),
+        ("force_y", "force_y_n"),
+        ("force_z", "force_z_n"),
         ("top_risk", "top_risk"),
         ("bottom_peel", "bottom_peel_ratio"),
+        ("top_risk_area", "top_risk_area_mm2"),
+        ("top_damage", "top_damage_area_mm2"),
         ("panel_lift", "panel_lift_mm"),
         ("twist", "panel_twist_mm"),
         ("force", "force_n"),
+        ("moment", "moment_n_mm"),
     )
     columns: dict[str, list[float]] = {}
     for condition, result in (("a", result_a), ("b", result_b)):
@@ -148,6 +159,9 @@ def _report_metrics(result_a: Any, result_b: Any) -> list[tuple[str, str, str]]:
         ("최대 패널 들림", ("max_panel_lift_mm", "panel_max_lift_mm"), " mm"),
         ("최대 패널 비틀림", ("max_panel_twist_mm", "panel_twist_mm"), " mm"),
         ("상면 최대 위험 면적", ("max_top_risk_area_mm2", "top_risk_area_mm2"), " mm²"),
+        ("상면 최종 손상 면적", ("final_top_damage_area_mm2",), " mm²"),
+        ("상면 임계 초과 지속시간", ("top_risk_exceedance_duration_s",), " s"),
+        ("최대 하중 모멘트", ("max_moment_resultant_n_mm",), " N·mm"),
     )
     rows = []
     for label, names, unit in specs:

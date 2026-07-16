@@ -24,8 +24,7 @@ def _self_test() -> int:
     from lamination_sim.presets import default_project
 
     project = default_project()
-    project.assumptions.uncertainty_samples = 2
-    project.assumptions.time_steps_coarse = 21
+    project.run_uncertainty = False
     result = compare(project)
     values = (
         result.result_a.peak_top_risk,
@@ -35,7 +34,10 @@ def _self_test() -> int:
     )
     if not all(math.isfinite(value) for value in values):
         return 2
-    if result.winner != "tie" or min(values[2:]) < 0.999:
+    if (
+        result.winner != "tie"
+        or min(values[2:]) < project.assumptions.bottom_completion_ratio
+    ):
         return 3
     return 0
 

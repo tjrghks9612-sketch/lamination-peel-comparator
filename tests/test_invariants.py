@@ -90,7 +90,7 @@ def test_condition_rejects_any_trajectory_length_other_than_six() -> None:
         Condition.model_validate(payload)
 
 
-def test_point_speed_applies_to_the_following_segment() -> None:
+def test_point_speed_is_a_waypoint_target_for_adjacent_segments() -> None:
     points = [
         TrajectoryPoint(x_mm=float(x), y_mm=0.0, z_mm=0.0, speed_mm_s=speed)
         for x, speed in zip((0, 10, 30, 60, 100, 150), (5, 10, 15, 20, 25, 999))
@@ -98,7 +98,9 @@ def test_point_speed_applies_to_the_following_segment() -> None:
 
     times = waypoint_times(points)
 
-    expected_durations = np.asarray((2.0, 2.0, 2.0, 2.0, 2.0))
+    distances = np.diff(np.asarray((0, 10, 30, 60, 100, 150), dtype=float))
+    speeds = np.asarray((5, 10, 15, 20, 25, 999), dtype=float)
+    expected_durations = 2.0 * distances / (speeds[:-1] + speeds[1:])
     np.testing.assert_allclose(np.diff(times), expected_durations)
 
 

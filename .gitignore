@@ -1,0 +1,14 @@
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+.coverage
+htmlcov/
+.venv/
+build/
+# The release onedir is intentionally tracked so GitHub Code ZIP users can run it.
+dist/*
+!dist/LaminationPeelComparator/
+!dist/LaminationPeelComparator/**
+output/
+*.log

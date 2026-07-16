@@ -1,0 +1,2 @@
+# Preserve the frozen runtime byte-for-byte in GitHub Code ZIP downloads.
+dist/** -text

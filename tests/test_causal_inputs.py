@@ -45,6 +45,8 @@ def _assert_same_prefix(first, second, end: int) -> None:
 def test_supplied_ab_data_are_accepted_without_z_normalization() -> None:
     project = measured_project()
 
+    assert project.condition_a.panel.thickness_mm == pytest.approx(0.056)
+    assert project.condition_b.panel.thickness_mm == pytest.approx(0.056)
     assert _trajectory_values(project.condition_a) == list(MEASURED_TRAJECTORY_A)
     assert _trajectory_values(project.condition_b) == list(MEASURED_TRAJECTORY_B)
     assert project.condition_a.trajectory[0].speed_mm_s == 0.0

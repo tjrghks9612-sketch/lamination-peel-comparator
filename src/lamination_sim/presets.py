@@ -120,6 +120,10 @@ def measured_project() -> ProjectV1:
 
     condition_a = default_condition("Condition A")
     condition_b = default_condition("Condition B")
+    # This measured panel is a 56 µm sheet. Keep the generic ``pro`` preset at
+    # 0.7 mm, but never let the measured A/B factory silently inherit it.
+    condition_a.panel.thickness_mm = 0.056
+    condition_b.panel.thickness_mm = 0.056
     condition_a.trajectory = [
         TrajectoryPoint(x_mm=x, y_mm=y, z_mm=z, speed_mm_s=speed)
         for x, y, z, speed in MEASURED_TRAJECTORY_A

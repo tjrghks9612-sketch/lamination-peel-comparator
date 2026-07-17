@@ -18,7 +18,7 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from .core_bridge import RunBundle, get_value, scalar_metric
+from .core_bridge import RunBundle, get_value, result_series, scalar_metric
 from .theme import COLORS
 from .visualization import LineChart, PeelView
 
@@ -150,6 +150,8 @@ class ResultsView(QWidget):
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
         self.bundle: RunBundle | None = None
+        self._time_start_s = 0.0
+        self._time_end_s = 1.0
         self._timer = QTimer(self)
         self._timer.setInterval(42)
         self._timer.timeout.connect(self._advance)
@@ -212,7 +214,7 @@ class ResultsView(QWidget):
         self.timeline.setRange(0, 1000)
         self.timeline.valueChanged.connect(self._on_timeline)
         self.timeline_label = QLabel("0%")
-        self.timeline_label.setFixedWidth(45)
+        self.timeline_label.setFixedWidth(70)
         self.timeline_label.setAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
         self.timeline_label.setProperty("muted", True)
         layout.addWidget(self.play_button)
@@ -301,7 +303,30 @@ class ResultsView(QWidget):
         self.summary.set_comparison(comparison)
         self.view_a.set_data(condition_a, result_a)
         self.view_b.set_data(condition_b, result_b)
-        for chart in (
+        times_a = result_series(result_a, "time")
+        times_b = result_series(result_b, "time")
+        all_starts = [values[0] for values in (times_a, times_b) if values]
+        all_ends = [values[-1] for values in (times_a, times_b) if values]
+        self._time_start_s = min(all_starts, default=0.0)
+        self._time_end_s = max(all_ends, default=1.0)
+        if self._time_end_s <= self._time_start_s:
+            self._time_end_s = self._time_start_s + 1.0
+        z_values = (
+            result_series(result_a, "position_z")
+            + result_series(result_b, "position_z")
+        )
+        z_reference = max((abs(value) for value in z_values), default=1.0)
+        self.view_a.set_z_reference(z_reference)
+        self.view_b.set_z_reference(z_reference)
+        for chart in self._charts():
+            chart.set_time_range(self._time_start_s, self._time_end_s)
+            chart.set_results(result_a, result_b)
+        self._set_metric_cards(comparison, result_a, result_b)
+        self.timeline.setValue(0)
+        self._on_timeline(0)
+
+    def _charts(self) -> tuple[LineChart, ...]:
+        return (
             self.risk_chart,
             self.peel_chart,
             self.risk_area_chart,
@@ -315,10 +340,7 @@ class ResultsView(QWidget):
             self.force_x_chart,
             self.force_y_chart,
             self.force_z_chart,
-        ):
-            chart.set_results(result_a, result_b)
-        self._set_metric_cards(comparison, result_a, result_b)
-        self.timeline.setValue(0)
+        )
 
     def _set_metric_cards(self, comparison: Any, result_a: Any, result_b: Any) -> None:
         risk_a = scalar_metric(result_a, "peak_top_risk", "top_peak_risk", "peak_rtop")
@@ -377,20 +399,14 @@ class ResultsView(QWidget):
 
     def _on_timeline(self, value: int) -> None:
         progress = value / 1000.0
-        self.timeline_label.setText(f"{progress * 100:.0f}%")
-        self.view_a.set_progress(progress)
-        self.view_b.set_progress(progress)
-        for chart in (
-            self.risk_chart,
-            self.peel_chart,
-            self.risk_area_chart,
-            self.damage_chart,
-            self.lift_chart,
-            self.force_chart,
-            self.twist_chart,
-            self.moment_chart,
-        ):
-            chart.set_progress(progress)
+        selected_time = self._time_start_s + progress * (
+            self._time_end_s - self._time_start_s
+        )
+        self.timeline_label.setText(f"{selected_time:.2f} s")
+        self.view_a.set_time(selected_time, progress)
+        self.view_b.set_time(selected_time, progress)
+        for chart in self._charts():
+            chart.set_time(selected_time, progress)
 
     def _toggle_playback(self) -> None:
         if self._timer.isActive():
@@ -403,7 +419,9 @@ class ResultsView(QWidget):
             self.play_button.setText("❚❚")
 
     def _advance(self) -> None:
-        next_value = self.timeline.value() + 7
+        duration = max(self._time_end_s - self._time_start_s, 1.0e-9)
+        step = max(1, round(1000.0 * (self._timer.interval() / 1000.0) / duration))
+        next_value = self.timeline.value() + step
         if next_value >= self.timeline.maximum():
             self.timeline.setValue(self.timeline.maximum())
             self._timer.stop()

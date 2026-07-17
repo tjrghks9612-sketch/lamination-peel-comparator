@@ -5,10 +5,17 @@ import pytest
 from pydantic import ValidationError
 
 from lamination_sim.comparison import compare
-from lamination_sim.models import AssumptionSet
+from lamination_sim.__main__ import _self_test
+from lamination_sim.models import AssumptionSet, SweepLevel
 from lamination_sim.presets import default_condition, default_project
 from lamination_sim.simulation import simulate
 from lamination_sim.trajectory import interpolate_trajectory, waypoint_times
+
+
+def _use_single_high_tension(project) -> None:
+    project.tension_sweep.enabled = False
+    project.tension_sweep.preload_levels = [SweepLevel(label="test", value=20.0)]
+    project.tension_sweep.stiffness_levels = [SweepLevel(label="test", value=1.0)]
 
 
 def test_condition_requires_exactly_six_distinct_points() -> None:
@@ -21,6 +28,10 @@ def test_condition_requires_exactly_six_distinct_points() -> None:
     data["trajectory"][1] = data["trajectory"][0]
     with pytest.raises(ValidationError, match="must be distinct"):
         type(condition).model_validate(data)
+
+
+def test_packaged_self_test_accepts_default_tension_sweep() -> None:
+    assert _self_test() == 0
 
 
 def test_piecewise_linear_trajectory_uses_waypoint_target_speeds() -> None:
@@ -101,6 +112,7 @@ def test_absolute_p1_height_changes_initial_equilibrium() -> None:
 def test_identical_conditions_compare_as_tie() -> None:
     project = default_project()
     project.run_uncertainty = False
+    _use_single_high_tension(project)
     result = compare(project)
     assert result.winner == "tie"
     assert result.classification == "tie"
@@ -112,6 +124,7 @@ def test_identical_conditions_compare_as_tie() -> None:
 def test_swapping_conditions_swaps_the_winner() -> None:
     project = default_project()
     project.run_uncertainty = False
+    _use_single_high_tension(project)
     project.condition_b.bottom_film.adhesion_gf *= 10.0
     forward = compare(project)
     assert forward.winner == "a"
@@ -130,6 +143,7 @@ def test_swapping_conditions_swaps_the_winner() -> None:
 
 def test_paired_uncertainty_is_seed_reproducible() -> None:
     project = default_project()
+    project.run_uncertainty = True
     project.assumptions.uncertainty_samples = 4
     project.assumptions.time_steps_coarse = 21
     first = compare(project)

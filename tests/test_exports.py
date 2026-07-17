@@ -33,8 +33,15 @@ def test_csv_and_html_exports_are_nonempty(tmp_path):
     assert "top_risk_a" in csv_text
     assert "top_damage_area_mm2_a" in csv_text
     assert "moment_n_mm_a" in csv_text
+    assert "tension_n_a" in csv_text
+    assert "tape_span_length_mm_a" in csv_text
+    assert "tension_scenario_index" in csv_text
+    assert "p1_tension_a_n" in csv_text
+    assert "tension_winner" in csv_text
     assert "필름 역박리 A/B 비교 보고서" in html_text
     assert "실제 안전·불량" in html_text
+    assert "풀테이프 장력 민감도" in html_text
+    assert "등가 인장강성" in html_text
 
 
 def test_measured_csv_exports_absolute_z_zero_speed_angle_and_force(tmp_path) -> None:

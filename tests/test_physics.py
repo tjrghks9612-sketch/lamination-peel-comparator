@@ -4,13 +4,22 @@ import numpy as np
 import pytest
 
 from lamination_sim.comparison import compare
-from lamination_sim.models import AssumptionSet
+from lamination_sim.models import AssumptionSet, SweepLevel, TensionCase
 from lamination_sim.presets import default_condition, default_project
 from lamination_sim.simulation import (
     _actuator_work_n_mm,
     _film_reach_mask,
     simulate,
 )
+
+
+HIGH_TENSION = TensionCase(initial_preload_n=20.0, tape_stiffness_n_per_mm=1.0)
+
+
+def _use_single_high_tension(project) -> None:
+    project.tension_sweep.enabled = False
+    project.tension_sweep.preload_levels = [SweepLevel(label="test", value=20.0)]
+    project.tension_sweep.stiffness_levels = [SweepLevel(label="test", value=1.0)]
 
 
 def test_actuator_work_uses_force_direction_not_scalar_path_length() -> None:
@@ -79,8 +88,8 @@ def test_stronger_bottom_adhesion_reduces_actual_peel() -> None:
     stronger.bottom_film.adhesion_gf *= 10.0
     assumptions = AssumptionSet()
 
-    baseline_result = simulate(baseline, assumptions, "coarse")
-    stronger_result = simulate(stronger, assumptions, "coarse")
+    baseline_result = simulate(baseline, assumptions, "coarse", HIGH_TENSION)
+    stronger_result = simulate(stronger, assumptions, "coarse", HIGH_TENSION)
 
     assert baseline_result.final_bottom_peel_ratio >= assumptions.bottom_completion_ratio
     assert stronger_result.final_bottom_peel_ratio < assumptions.bottom_completion_ratio
@@ -93,7 +102,7 @@ def test_stronger_bottom_adhesion_reduces_actual_peel() -> None:
 def test_top_damage_reduces_local_foundation_and_converges() -> None:
     condition = default_condition()
     condition.top_film.adhesion_gf = 0.002
-    assumptions = AssumptionSet(time_steps_coarse=21, damage_max_iterations=100)
+    assumptions = AssumptionSet(time_steps_coarse=21, damage_max_iterations=200)
 
     result = simulate(condition, assumptions, "coarse")
 
@@ -160,9 +169,9 @@ def test_mesh_refinement_converges_from_four_to_two_to_one_mm() -> None:
     condition = default_condition()
     assumptions = AssumptionSet()
 
-    coarse = simulate(condition, assumptions, "coarse")
-    normal = simulate(condition, assumptions, "normal")
-    fine = simulate(condition, assumptions, "fine")
+    coarse = simulate(condition, assumptions, "coarse", HIGH_TENSION)
+    normal = simulate(condition, assumptions, "normal", HIGH_TENSION)
+    fine = simulate(condition, assumptions, "fine", HIGH_TENSION)
 
     assert coarse.final_bottom_peel_ratio == pytest.approx(1.0, abs=1.0e-12)
     assert normal.final_bottom_peel_ratio == pytest.approx(1.0, abs=1.0e-12)
@@ -188,8 +197,8 @@ def test_xy_path_order_changes_damage_front_and_mechanics() -> None:
             point.x_mm = width * x_fraction
             point.y_mm = height * y_fraction
 
-    x_result = simulate(x_first, AssumptionSet(), "coarse")
-    y_result = simulate(y_first, AssumptionSet(), "coarse")
+    x_result = simulate(x_first, AssumptionSet(), "coarse", HIGH_TENSION)
+    y_result = simulate(y_first, AssumptionSet(), "coarse", HIGH_TENSION)
 
     assert x_result.final_bottom_peel_ratio == pytest.approx(1.0)
     assert y_result.final_bottom_peel_ratio == pytest.approx(1.0)
@@ -215,6 +224,7 @@ def test_three_axis_force_and_moment_are_applied() -> None:
 def test_bottom_completion_gate_precedes_top_risk_ranking() -> None:
     project = default_project()
     project.run_uncertainty = False
+    _use_single_high_tension(project)
     project.condition_b.bottom_film.adhesion_gf *= 10.0
 
     result = compare(project)
@@ -228,6 +238,7 @@ def test_bottom_completion_gate_precedes_top_risk_ranking() -> None:
 def test_crossing_pareto_metrics_produce_inconclusive_result() -> None:
     project = default_project()
     project.run_uncertainty = False
+    _use_single_high_tension(project)
     project.condition_a.top_film.adhesion_gf = 10.0
     project.condition_a.panel.thickness_mm = 0.4
     project.condition_b.top_film.adhesion_gf = 2.0
@@ -244,6 +255,7 @@ def test_crossing_pareto_metrics_produce_inconclusive_result() -> None:
 
 def test_too_few_uncertainty_samples_cannot_be_robust() -> None:
     project = default_project()
+    project.run_uncertainty = True
     project.assumptions.uncertainty_samples = 4
     project.assumptions.time_steps_coarse = 21
 

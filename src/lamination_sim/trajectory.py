@@ -149,19 +149,3 @@ def interpolate_trajectory(
         waypoint_indices=waypoint_indices,
         path_parameter=path_parameter,
     )
-
-
-def projected_progress(xyz_mm: FloatArray) -> FloatArray:
-    """Return a deprecated coordinate-independent sample parameter.
-
-    This compatibility helper is intentionally not used by the physics engine.
-    Callers with waypoint information should use
-    :attr:`TrajectorySeries.path_parameter`, which is causal and segment-local.
-    """
-
-    values = np.asarray(xyz_mm, dtype=float)
-    if values.ndim != 2 or len(values) < 1:
-        raise ValueError("xyz_mm must contain at least one 3-D sample")
-    if len(values) == 1:
-        return np.zeros(1, dtype=float)
-    return np.linspace(0.0, 1.0, len(values), dtype=float)

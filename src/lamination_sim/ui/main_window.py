@@ -11,6 +11,8 @@ from PySide6.QtGui import QAction, QCloseEvent, QKeySequence
 from PySide6.QtWidgets import (
     QApplication,
     QCheckBox,
+    QComboBox,
+    QDialog,
     QFileDialog,
     QFrame,
     QHBoxLayout,
@@ -35,9 +37,10 @@ from lamination_sim.exports import (
 )
 
 from .condition_editor import ConditionEditor
-from .core_bridge import RunBundle, build_project, get_value, to_plain
+from .core_bridge import RunBundle, build_project, get_value, sequence, to_plain
 from .results_view import ResultsView
 from .theme import COLORS, apply_theme
+from .tension_settings import TensionSettingsDialog
 from .worker import SimulationWorker
 
 
@@ -53,6 +56,7 @@ class MainWindow(QMainWindow):
         self.resize(1440, 920)
         self._project_path: Path | None = None
         self._assumptions: Any = {}
+        self._tension_sweep: Any = {}
         self._bundle: RunBundle | None = None
         self._dirty = False
         self._syncing = False
@@ -123,6 +127,9 @@ class MainWindow(QMainWindow):
         self.tabs = QTabWidget()
         self.setup_page = self._build_setup_page()
         self.results_page = ResultsView()
+        self.results_page.tension_mode_requested.connect(
+            self._set_tension_mode_from_results
+        )
         self.tabs.addTab(self.setup_page, "조건 입력")
         self.tabs.addTab(self.results_page, "비교 결과")
         root.addWidget(self.tabs, 1)
@@ -192,18 +199,32 @@ class MainWindow(QMainWindow):
         self.link_inputs.toggled.connect(self._on_link_toggled)
         copy_button = QPushButton("A 입력을 B에 복사")
         copy_button.clicked.connect(self._copy_shared_inputs)
-        self.run_uncertainty = QCheckBox("불확실성 24개 시나리오")
-        self.run_uncertainty.setChecked(True)
-        self.run_uncertainty.setToolTip("공통 가정 범위를 양 조건에 paired 방식으로 적용합니다.")
+        self.tension_enabled = QCheckBox("풀테이프 장력 민감도")
+        self.tension_enabled.setChecked(True)
+        self.tension_enabled.setToolTip("초기장력 × 등가 인장강성 조합을 A/B에 paired 적용합니다.")
+        self.tension_enabled.toggled.connect(self._on_tension_enabled)
+        self.tension_mode = QComboBox()
+        self.tension_mode.addItem("Equal preload", "equal_preload")
+        self.tension_mode.addItem("Shared rest length", "shared_rest_length")
+        self.tension_mode.currentIndexChanged.connect(self._on_tension_mode_changed)
+        tension_settings = QPushButton("장력 고급 설정…")
+        tension_settings.clicked.connect(self._open_tension_settings)
+        self.run_uncertainty = QCheckBox("재료 불확실성")
+        self.run_uncertainty.setChecked(False)
+        self.run_uncertainty.setToolTip("PSA·패널 강성·시험 폭·각도 가정을 paired 적용합니다.")
         self.run_uncertainty.toggled.connect(self._mark_dirty)
-        note = QLabel("gf는 절대 계면 강도가 아닌 상대 저항으로 계산")
-        note.setProperty("dim", True)
+        self.run_uncertainty.toggled.connect(self._update_run_estimate)
+        self.run_estimate = QLabel()
+        self.run_estimate.setProperty("dim", True)
         controls_layout.addWidget(self.link_inputs)
         controls_layout.addWidget(copy_button)
         controls_layout.addSpacing(8)
+        controls_layout.addWidget(self.tension_enabled)
+        controls_layout.addWidget(self.tension_mode)
+        controls_layout.addWidget(tension_settings)
         controls_layout.addWidget(self.run_uncertainty)
         controls_layout.addStretch(1)
-        controls_layout.addWidget(note)
+        controls_layout.addWidget(self.run_estimate)
         layout.addWidget(controls)
 
         scroll = QScrollArea()
@@ -241,8 +262,14 @@ class MainWindow(QMainWindow):
             self.editor_a.set_condition(get_value(project, "condition_a", "a", default={}))
             self.editor_b.set_condition(get_value(project, "condition_b", "b", default={}))
             self._assumptions = get_value(project, "assumptions", "assumption_set", default={})
+            self._tension_sweep = get_value(project, "tension_sweep", default={})
+            self.tension_enabled.setChecked(
+                bool(get_value(self._tension_sweep, "enabled", default=True))
+            )
+            mode = str(get_value(self._tension_sweep, "mode", default="equal_preload"))
+            self.tension_mode.setCurrentIndex(max(0, self.tension_mode.findData(mode)))
             self.run_uncertainty.setChecked(
-                bool(get_value(project, "run_uncertainty", default=True))
+                bool(get_value(project, "run_uncertainty", default=False))
             )
         finally:
             self._syncing = False
@@ -250,6 +277,7 @@ class MainWindow(QMainWindow):
         self._dirty = False
         self._update_title()
         self.tabs.setCurrentWidget(self.setup_page)
+        self._update_run_estimate()
 
     def _project_payload(self) -> dict[str, Any]:
         return {
@@ -257,8 +285,72 @@ class MainWindow(QMainWindow):
             "condition_a": self.editor_a.condition_payload(),
             "condition_b": self.editor_b.condition_payload(),
             "assumptions": to_plain(self._assumptions),
+            "tension_sweep": to_plain(self._tension_sweep),
             "run_uncertainty": self.run_uncertainty.isChecked(),
         }
+
+    def _on_tension_enabled(self, checked: bool) -> None:
+        payload = to_plain(self._tension_sweep) or {}
+        payload["enabled"] = bool(checked)
+        self._tension_sweep = payload
+        self.tension_mode.setEnabled(checked)
+        self._update_run_estimate()
+        self._mark_dirty()
+
+    def _on_tension_mode_changed(self, _index: int) -> None:
+        if self._syncing:
+            return
+        payload = to_plain(self._tension_sweep) or {}
+        payload["mode"] = str(self.tension_mode.currentData())
+        self._tension_sweep = payload
+        self._update_run_estimate()
+        self._mark_dirty()
+
+    def _set_tension_mode_from_results(self, mode: str) -> None:
+        index = self.tension_mode.findData(mode)
+        if index < 0 or index == self.tension_mode.currentIndex():
+            return
+        self.tension_mode.setCurrentIndex(index)
+        self.tabs.setCurrentWidget(self.setup_page)
+        self.statusBar().showMessage("장력 모드가 변경되었습니다. 다시 실행해 결과를 갱신하세요.", 6000)
+
+    def _open_tension_settings(self) -> None:
+        samples = int(get_value(self._assumptions, "uncertainty_samples", default=24))
+        dialog = TensionSettingsDialog(
+            self._tension_sweep,
+            run_material_uncertainty=self.run_uncertainty.isChecked(),
+            material_samples=samples,
+            parent=self,
+        )
+        if dialog.exec() != QDialog.DialogCode.Accepted:
+            return
+        self._tension_sweep = dialog.payload()
+        self._syncing = True
+        try:
+            self.tension_enabled.setChecked(True)
+            self.tension_mode.setCurrentIndex(
+                max(0, self.tension_mode.findData(self._tension_sweep["mode"]))
+            )
+        finally:
+            self._syncing = False
+        self._update_run_estimate()
+        self._mark_dirty()
+
+    def _update_run_estimate(self, *_args) -> None:
+        preloads = sequence(get_value(self._tension_sweep, "preload_levels", default=[]))
+        stiffnesses = sequence(get_value(self._tension_sweep, "stiffness_levels", default=[]))
+        combinations = max(1, len(preloads)) * max(1, len(stiffnesses))
+        samples = int(get_value(self._assumptions, "uncertainty_samples", default=24))
+        nested = bool(
+            get_value(self._tension_sweep, "nest_material_uncertainty", default=False)
+        )
+        if self.run_uncertainty.isChecked() and nested:
+            total = combinations * samples * 2
+        else:
+            total = combinations * 2
+            if self.run_uncertainty.isChecked():
+                total += max(samples - 1, 0) * 2
+        self.run_estimate.setText(f"예상 {total}회")
 
     def current_project(self) -> Any:
         return build_project(self._project_payload())
@@ -519,4 +611,3 @@ def run_app(argv: list[str] | None = None) -> int:
 
 
 __all__ = ["MainWindow", "run_app"]
-

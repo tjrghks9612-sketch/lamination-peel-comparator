@@ -14,7 +14,7 @@ import numpy as np
 import pytest
 from pydantic import ValidationError
 
-from lamination_sim.models import Condition, ProjectV1, TrajectoryPoint
+from lamination_sim.models import Condition, ProjectV1, SweepLevel, TrajectoryPoint
 from lamination_sim.presets import default_condition, default_project
 from lamination_sim.trajectory import waypoint_times
 
@@ -81,6 +81,12 @@ def _peak_top_risk(result: Any) -> float:
     )
 
 
+def _use_single_high_tension(project: ProjectV1) -> None:
+    project.tension_sweep.enabled = False
+    project.tension_sweep.preload_levels = [SweepLevel(label="test", value=20.0)]
+    project.tension_sweep.stiffness_levels = [SweepLevel(label="test", value=1.0)]
+
+
 def test_condition_rejects_any_trajectory_length_other_than_six() -> None:
     condition = default_condition()
     payload = condition.model_dump(mode="python")
@@ -124,13 +130,14 @@ def test_peel_progress_and_top_damage_never_reverse() -> None:
     damage_area = np.asarray(_get_value(result, "top_damage_area_mm2"), dtype=float)
     assert np.all(np.diff(peel_ratio) >= -1.0e-12)
     assert np.all(np.diff(damage_area) >= -1.0e-12)
-    assert peel_ratio[-1] == pytest.approx(1.0)
+    assert 0.0 < peel_ratio[-1] < 1.0
 
 
 def test_identical_conditions_have_identical_nominal_risk() -> None:
     _, compare = _load_solver_api()
     project = default_project()
     project.run_uncertainty = False
+    _use_single_high_tension(project)
 
     comparison = compare(project)
     result_a, result_b = _result_pair(comparison)
@@ -144,6 +151,7 @@ def test_swapping_conditions_swaps_nominal_results() -> None:
     _, compare = _load_solver_api()
     project = default_project()
     project.run_uncertainty = False
+    _use_single_high_tension(project)
     project.condition_b.top_film.adhesion_gf *= 1.5
 
     forward = compare(project)
@@ -153,6 +161,7 @@ def test_swapping_conditions_swaps_nominal_results() -> None:
         assumptions=project.assumptions,
         run_uncertainty=False,
     )
+    _use_single_high_tension(swapped_project)
     reverse = compare(swapped_project)
 
     forward_a, forward_b = _result_pair(forward)

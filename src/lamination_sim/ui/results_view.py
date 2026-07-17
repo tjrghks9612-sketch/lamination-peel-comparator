@@ -20,6 +20,7 @@ from PySide6.QtWidgets import (
 
 from .core_bridge import RunBundle, get_value, result_series, scalar_metric
 from .theme import COLORS
+from .tension_view import TensionSweepView
 from .visualization import LineChart, PeelView
 
 
@@ -146,6 +147,7 @@ class ResultsView(QWidget):
     """Result summary, paired visualization, synchronized timeline and charts."""
 
     export_requested = Signal()
+    tension_mode_requested = Signal(str)
 
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
@@ -225,6 +227,7 @@ class ResultsView(QWidget):
 
     def _build_charts(self) -> QTabWidget:
         tabs = QTabWidget()
+        self.chart_tabs = tabs
         risk_tab = QWidget()
         risk_layout = QHBoxLayout(risk_tab)
         risk_layout.setContentsMargins(0, 8, 0, 0)
@@ -291,6 +294,9 @@ class ResultsView(QWidget):
         tabs.addTab(moment_tab, "비틀림 · 모멘트")
         tabs.addTab(command_tab, "속도 · 박리각")
         tabs.addTab(force_components_tab, "Fx · Fy · Fz")
+        self.tension_sweep_view = TensionSweepView()
+        self.tension_sweep_view.mode_requested.connect(self.tension_mode_requested)
+        tabs.addTab(self.tension_sweep_view, "풀테이프 장력 민감도")
         return tabs
 
     def set_bundle(self, bundle: RunBundle) -> None:
@@ -321,6 +327,7 @@ class ResultsView(QWidget):
         for chart in self._charts():
             chart.set_time_range(self._time_start_s, self._time_end_s)
             chart.set_results(result_a, result_b)
+        self.tension_sweep_view.set_comparison(comparison)
         self._set_metric_cards(comparison, result_a, result_b)
         self.timeline.setValue(0)
         self._on_timeline(0)
@@ -364,6 +371,7 @@ class ResultsView(QWidget):
         )
         rate_a = scalar_metric(
             comparison,
+            "tension_a_win_rate",
             "uncertainty_a_win_rate",
             "a_win_rate",
             "condition_a_win_rate",
@@ -371,12 +379,13 @@ class ResultsView(QWidget):
         )
         rate_b = scalar_metric(
             comparison,
+            "tension_b_win_rate",
             "uncertainty_b_win_rate",
             "b_win_rate",
             "condition_b_win_rate",
             "b_wins_rate",
         )
-        counts = get_value(comparison, "uncertainty_counts", default={})
+        counts = get_value(comparison, "tension_counts", "uncertainty_counts", default={})
         if rate_a is None:
             rate_a = scalar_metric(counts, "a_rate", "a_win_rate")
         if rate_b is None:
@@ -385,16 +394,17 @@ class ResultsView(QWidget):
             rate_a *= 100
         if rate_b is not None and rate_b <= 1:
             rate_b *= 100
-        uncertainty_enabled = bool(get_value(comparison, "uncertainty_enabled", default=False))
-        if not uncertainty_enabled:
+        sweep_enabled = bool(get_value(comparison, "tension_sweep_enabled", default=False))
+        if not sweep_enabled:
             self.robust_card.set_value("사용 안 함", "명목 조건만 계산")
         else:
-            ties = scalar_metric(comparison, "uncertainty_ties", default=0) or 0
-            scenarios = get_value(comparison, "scenario_results", default=[])
+            ties = scalar_metric(comparison, "tension_ties", default=0) or 0
+            pending = scalar_metric(comparison, "tension_inconclusive", default=0) or 0
+            scenarios = get_value(comparison, "tension_scenario_results", default=[])
             count = len(scenarios) if isinstance(scenarios, (list, tuple)) else 0
             self.robust_card.set_value(
                 f"A {_format_metric(rate_a, '%', 0)} · B {_format_metric(rate_b, '%', 0)}",
-                f"{count}개 중 동률 {ties:.0f}회",
+                f"{count}개 중 동률 {ties:.0f}회 · 보류 {pending:.0f}회",
             )
 
     def _on_timeline(self, value: int) -> None:

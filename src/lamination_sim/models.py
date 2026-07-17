@@ -15,6 +15,8 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator, model_valida
 
 PanelPreset = Literal["pro", "pro_max", "custom"]
 StartCorner = Literal["bottom_left", "bottom_right", "top_left", "top_right"]
+TensionMode = Literal["equal_preload", "shared_rest_length"]
+RestLengthReference = Literal["condition_a", "condition_b", "custom"]
 
 
 class _StrictModel(BaseModel):
@@ -161,7 +163,7 @@ class AssumptionSet(_StrictModel):
         ge=0.0,
         le=5.0,
         description=(
-            "Deprecated compatibility field. cohesive-v4-film-payout ignores "
+            "Deprecated compatibility field. cohesive-v5-tension-sweep ignores "
             "this value because vertical travel does not create free interface reach."
         ),
     )
@@ -172,7 +174,7 @@ class AssumptionSet(_StrictModel):
     damage_convergence_tolerance: float = Field(
         default=1.0e-3, gt=0.0, le=0.1
     )
-    damage_max_iterations: int = Field(default=100, ge=2, le=200)
+    damage_max_iterations: int = Field(default=150, ge=2, le=300)
     bottom_completion_ratio: float = Field(default=0.98, ge=0.5, le=1.0)
     speed_exponent: float = Field(default=0.0, ge=0.0, le=1.0)
     reference_speed_mm_s: float = Field(default=5.0, gt=0.0, le=10000.0)
@@ -190,9 +192,69 @@ class AssumptionSet(_StrictModel):
     tie_tolerance_percent: float = Field(default=2.0, ge=0.0, le=100.0)
 
 
+class SweepLevel(_StrictModel):
+    label: str = Field(min_length=1, max_length=40)
+    value: float = Field(ge=0.0, le=10000.0)
+
+
+def _default_preload_levels() -> list[SweepLevel]:
+    return [
+        SweepLevel(label="Low", value=0.0),
+        SweepLevel(label="Mid", value=0.5),
+        SweepLevel(label="High", value=1.5),
+    ]
+
+
+def _default_stiffness_levels() -> list[SweepLevel]:
+    return [
+        SweepLevel(label="Low", value=0.05),
+        SweepLevel(label="Mid", value=0.20),
+        SweepLevel(label="High", value=1.00),
+    ]
+
+
+class TensionCase(_StrictModel):
+    """Resolved tension law for one condition and one sensitivity cell."""
+
+    initial_preload_n: float = Field(default=0.5, ge=0.0, le=10000.0)
+    tape_stiffness_n_per_mm: float = Field(default=0.20, ge=0.0, le=10000.0)
+
+
+class TensionSweepConfig(_StrictModel):
+    enabled: bool = True
+    mode: TensionMode = "equal_preload"
+    preload_levels: list[SweepLevel] = Field(default_factory=_default_preload_levels)
+    stiffness_levels: list[SweepLevel] = Field(default_factory=_default_stiffness_levels)
+    rest_length_reference: RestLengthReference = "condition_a"
+    custom_rest_length_mm: float | None = Field(default=None, gt=0.0, le=10000.0)
+    nest_material_uncertainty: bool = False
+
+    @model_validator(mode="after")
+    def _valid_sweep(self) -> "TensionSweepConfig":
+        if not self.preload_levels or not self.stiffness_levels:
+            raise ValueError("tension sweep requires at least one preload and stiffness level")
+        if len(self.preload_levels) * len(self.stiffness_levels) > 100:
+            raise ValueError("tension sweep cannot exceed 100 combinations")
+        for name, levels in (
+            ("preload", self.preload_levels),
+            ("stiffness", self.stiffness_levels),
+        ):
+            labels = [level.label.casefold() for level in levels]
+            if len(labels) != len(set(labels)):
+                raise ValueError(f"{name} level labels must be unique")
+        if (
+            self.mode == "shared_rest_length"
+            and self.rest_length_reference == "custom"
+            and self.custom_rest_length_mm is None
+        ):
+            raise ValueError("custom shared rest length mode requires custom_rest_length_mm")
+        return self
+
+
 class ProjectV1(_StrictModel):
     schema_version: Literal["1.0"] = "1.0"
     condition_a: Condition
     condition_b: Condition
     assumptions: AssumptionSet = Field(default_factory=AssumptionSet)
-    run_uncertainty: bool = True
+    tension_sweep: TensionSweepConfig = Field(default_factory=TensionSweepConfig)
+    run_uncertainty: bool = False

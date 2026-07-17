@@ -7,7 +7,7 @@ from typing import Any
 
 from PySide6.QtCore import QObject, Signal, Slot
 
-from .core_bridge import run_project
+from .core_bridge import get_value, run_project, sequence
 
 
 class SimulationWorker(QObject):
@@ -21,11 +21,30 @@ class SimulationWorker(QObject):
 
     @Slot()
     def run(self) -> None:
-        self.progress.emit("명목 조건과 민감도 시나리오를 계산하고 있습니다…")
+        sweep = get_value(self.project, "tension_sweep", default={})
+        preload_count = max(1, len(sequence(get_value(sweep, "preload_levels", default=[]))))
+        stiffness_count = max(1, len(sequence(get_value(sweep, "stiffness_levels", default=[]))))
+        combinations = preload_count * stiffness_count
+        material_enabled = bool(get_value(self.project, "run_uncertainty", default=False))
+        nested = bool(get_value(sweep, "nest_material_uncertainty", default=False))
+        material_count = int(
+            get_value(
+                get_value(self.project, "assumptions", default={}),
+                "uncertainty_samples",
+                default=1,
+            )
+        )
+        runs = combinations * 2
+        if material_enabled and nested:
+            runs = combinations * max(material_count, 1) * 2
+        elif material_enabled:
+            runs += max(material_count - 1, 0) * 2
+        self.progress.emit(
+            f"장력 {combinations}조합 × A/B를 계산하고 있습니다… 예상 {runs}회 해석"
+        )
         try:
             bundle = run_project(self.project)
         except Exception as exc:  # Worker must return errors to the UI thread.
             self.failed.emit(str(exc), traceback.format_exc())
             return
         self.finished.emit(bundle)
-

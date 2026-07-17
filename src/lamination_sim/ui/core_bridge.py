@@ -179,6 +179,8 @@ SERIES_ALIASES: dict[str, tuple[str, ...]] = {
         "moment_history_n_mm",
         "pull_moment_n_mm",
     ),
+    "tension": ("tension_n", "tape_tension_n"),
+    "tape_span": ("tape_span_length_mm", "span_length_mm"),
 }
 
 VECTOR_SERIES: dict[str, tuple[tuple[str, ...], int]] = {

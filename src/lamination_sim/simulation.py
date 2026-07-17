@@ -20,12 +20,12 @@ from pydantic import BaseModel, ConfigDict, Field
 from scipy import sparse
 from scipy.sparse.linalg import splu
 
-from .models import AssumptionSet, Condition
+from .models import AssumptionSet, Condition, TensionCase
 from .trajectory import interpolate_trajectory
 
 
 Resolution = Literal["coarse", "normal", "fine"]
-MODEL_VERSION = "cohesive-v4-film-payout"
+MODEL_VERSION = "cohesive-v5-tension-sweep"
 FloatArray = NDArray[np.float64]
 
 
@@ -52,6 +52,11 @@ class SimulationResult(BaseModel):
     moment_xyz_n_mm: list[list[float]]
     moment_resultant_n_mm: list[float]
     pull_force_activation: list[float]
+    tension_n: list[float]
+    tape_span_length_mm: list[float]
+    p1_span_length_mm: float
+    initial_preload_n: float
+    tape_stiffness_n_per_mm: float
     bottom_peel_ratio: list[float]
     top_peak_risk: list[float]
     top_risk_area_mm2: list[float]
@@ -74,6 +79,7 @@ class SimulationResult(BaseModel):
     max_panel_lift_mm: float
     max_panel_twist_mm: float
     max_moment_resultant_n_mm: float
+    max_tension_n: float
 
     mesh_shape: tuple[int, int]
     mesh_x_mm: list[float]
@@ -226,34 +232,6 @@ def _energy_release_n_per_mm(
     return line_force * angular + stretching
 
 
-def _required_line_force(
-    gamma: float,
-    peel_angle: FloatArray,
-    pet_thickness_um: float,
-    assumptions: AssumptionSet,
-) -> FloatArray:
-    extensional_stiffness = (
-        assumptions.pet_young_modulus_gpa
-        * 1000.0
-        * (pet_thickness_um / 1000.0)
-    )
-    angular = np.maximum(1.0 - np.cos(peel_angle), 0.0)
-    quadratic = assumptions.mixed_mode_shear_weight / (
-        2.0 * extensional_stiffness
-    )
-    if quadratic > 1.0e-15:
-        discriminant = angular**2 + 4.0 * quadratic * gamma
-        return (-angular + np.sqrt(np.maximum(discriminant, 0.0))) / (
-            2.0 * quadratic
-        )
-    return np.divide(
-        gamma,
-        angular,
-        out=np.full_like(angular, np.inf),
-        where=angular > 1.0e-15,
-    )
-
-
 def _corner_distances(
     mesh_x: FloatArray,
     mesh_y: FloatArray,
@@ -332,6 +310,33 @@ def _actuator_work_n_mm(force_xyz_n: FloatArray, displacement_xyz_mm: FloatArray
     return max(float(np.dot(force_xyz_n, displacement_xyz_mm)), 0.0)
 
 
+def tension_from_span(
+    span_length_mm: float,
+    p1_span_length_mm: float,
+    initial_preload_n: float,
+    tape_stiffness_n_per_mm: float,
+    max_pull_force_n: float,
+) -> float:
+    """Unilateral capped tension law; a tape never carries compression."""
+
+    tension = initial_preload_n + tape_stiffness_n_per_mm * (
+        span_length_mm - p1_span_length_mm
+    )
+    return min(max(float(tension), 0.0), float(max_pull_force_n))
+
+
+def p1_span_length_mm(condition: Condition) -> float:
+    """Distance from the initially attached corner/front to the P1 gripper."""
+
+    corner = _corner_coordinate(
+        condition.panel.width_mm,
+        condition.panel.height_mm,
+        condition.pull_tape.start_corner,
+    )
+    p1 = condition.trajectory[0]
+    return float(np.linalg.norm(np.asarray((p1.x_mm, p1.y_mm, p1.z_mm)) - np.asarray((*corner, 0.0))))
+
+
 def _front_mechanics(
     damage: FloatArray,
     seed: NDArray[np.bool_],
@@ -387,10 +392,10 @@ def _front_mechanics(
     )
     drive_ratio = release / max(gamma, 1.0e-15)
     drive_ratio = np.where(kinematic_mask[indices], drive_ratio, 0.0)
-    required = _required_line_force(
-        gamma, angles, pet_thickness_um, assumptions
-    )
-    reaction_line_force = np.minimum(available_line_force, required)
+    # The spring law supplies the actual tensile force.  Adhesion controls
+    # crack advance through ``drive_ratio``; it must not silently clip the
+    # externally transmitted reaction below that tension.
+    reaction_line_force = available_line_force
     node_force = (
         reaction_line_force[:, None]
         * edge_width[:, None]
@@ -512,6 +517,7 @@ def _equivalent_panel_load(
     center_xy: FloatArray,
     mesh_x: FloatArray,
     mesh_y: FloatArray,
+    nodal_areas: FloatArray,
     sigma: float,
     torsion_coupling: float,
 ) -> FloatArray:
@@ -519,7 +525,7 @@ def _equivalent_panel_load(
 
     dx = mesh_x - center_xy[0]
     dy = mesh_y - center_xy[1]
-    weights = np.exp(-(dx**2 + dy**2) / (2.0 * sigma**2))
+    weights = np.exp(-(dx**2 + dy**2) / (2.0 * sigma**2)) * nodal_areas
     weight_sum = float(weights.sum())
     if weight_sum <= 1.0e-15:
         weights[int(np.argmin(dx**2 + dy**2))] = 1.0
@@ -557,10 +563,16 @@ def _corner_values(displacement: FloatArray, nx: int, ny: int) -> tuple[float, .
     )
 
 
-def _input_hash(condition: Condition, assumptions: AssumptionSet, resolution: str) -> str:
+def _input_hash(
+    condition: Condition,
+    assumptions: AssumptionSet,
+    tension_case: TensionCase,
+    resolution: str,
+) -> str:
     payload = (
         condition.model_dump_json()
         + assumptions.model_dump_json()
+        + tension_case.model_dump_json()
         + resolution
         + MODEL_VERSION
     )
@@ -616,9 +628,11 @@ def simulate(
     condition: Condition,
     assumptions: AssumptionSet,
     resolution: Resolution = "normal",
+    tension_case: TensionCase | None = None,
 ) -> SimulationResult:
     """Run one deterministic stateful cohesive-zone comparison simulation."""
 
+    tension_case = tension_case or TensionCase()
     mesh_size, requested_steps, requested_frames = _resolution_values(
         assumptions, resolution
     )
@@ -679,7 +693,9 @@ def simulate(
     force_resultant = np.zeros(steps, dtype=float)
     moment_xyz = np.zeros((steps, 3), dtype=float)
     moment_resultant = np.zeros(steps, dtype=float)
-    force_activation = np.ones(steps, dtype=float)
+    force_activation = np.zeros(steps, dtype=float)
+    tension_history = np.zeros(steps, dtype=float)
+    span_history = np.zeros(steps, dtype=float)
     peel_angles = np.zeros(steps, dtype=float)
     bottom_ratio = np.zeros(steps, dtype=float)
     peak_risk = np.zeros(steps, dtype=float)
@@ -697,6 +713,29 @@ def simulate(
     tolerance = assumptions.damage_convergence_tolerance
     max_iterations = assumptions.damage_max_iterations
     cumulative_in_plane_travel = 0.0
+    p1_span = p1_span_length_mm(condition)
+
+    def current_tension_and_span(
+        current_damage: FloatArray, current_gripper: FloatArray
+    ) -> tuple[float, float]:
+        _segment, center = _damage_front(
+            current_damage, x, y, condition.pull_tape.start_corner
+        )
+        span = float(
+            np.linalg.norm(
+                current_gripper - np.asarray((*center, 0.0), dtype=float)
+            )
+        )
+        return (
+            tension_from_span(
+                span,
+                p1_span,
+                tension_case.initial_preload_n,
+                tension_case.tape_stiffness_n_per_mm,
+                assumptions.max_pull_force_n,
+            ),
+            span,
+        )
 
     for index in range(steps):
         gripper = trajectory.xyz_mm[index]
@@ -707,10 +746,11 @@ def simulate(
         cumulative_in_plane_travel += float(
             np.linalg.norm(gripper_increment[:2])
         )
-        # P1 is a held, tape-attached equilibrium state.  Unknown pre-P1 motion
-        # is never inferred from P1's absolute Z, so the actuator capacity is
-        # present at t=0 while zero path increment prevents artificial damage.
-        available_force = assumptions.max_pull_force_n
+        # P1 is a held, tape-attached equilibrium state. Unknown pre-P1 motion
+        # is not inferred; only the selected preload exists at the zero-work
+        # first frame. max_pull_force_n is an equipment cap, not a permanent
+        # force source.
+        available_force, _span = current_tension_and_span(bottom_damage, gripper)
         kinematic_mask = _film_reach_mask(
             local_x,
             local_y,
@@ -755,6 +795,9 @@ def simulate(
             )
             if changed <= tolerance or work_remaining <= 1.0e-15:
                 break
+            available_force, _span = current_tension_and_span(
+                bottom_damage, gripper
+            )
             mechanics = _front_mechanics(
                 bottom_damage,
                 seed,
@@ -775,6 +818,9 @@ def simulate(
             if not np.any(mechanics.drive_ratio >= 1.0):
                 break
         else:
+            available_force, _span = current_tension_and_span(
+                bottom_damage, gripper
+            )
             mechanics = _front_mechanics(
                 bottom_damage,
                 seed,
@@ -812,6 +858,12 @@ def simulate(
             bottom_damage.fill(1.0)
         bottom_converged[index] = converged
 
+        front, front_center = _damage_front(
+            bottom_damage, x, y, condition.pull_tape.start_corner
+        )
+        available_force, current_span = current_tension_and_span(
+            bottom_damage, gripper
+        )
         mechanics = _front_mechanics(
             bottom_damage,
             seed,
@@ -830,6 +882,9 @@ def simulate(
             assumptions,
         )
         force = mechanics.force_xyz
+        tension_history[index] = available_force
+        span_history[index] = current_span
+        force_activation[index] = available_force / assumptions.max_pull_force_n
         force_xyz[index] = force
         force_resultant[index] = float(np.linalg.norm(force))
         peel_angles[index] = mechanics.peel_angle_deg
@@ -837,9 +892,6 @@ def simulate(
             np.clip(np.dot(bottom_damage, nodal_areas) / panel_area, 0.0, 1.0)
         )
 
-        front, front_center = _damage_front(
-            bottom_damage, x, y, condition.pull_tape.start_corner
-        )
         fronts[index] = front
         front_xyz = np.asarray((*front_center, 0.0), dtype=float)
         lever = gripper - front_xyz
@@ -852,13 +904,17 @@ def simulate(
         moment_xyz[index] = applied_moment
         moment_resultant[index] = float(np.linalg.norm(applied_moment))
 
-        sigma = max(tape_width * 0.5, mesh_size * 1.5)
+        # The equivalent load footprint is a physical tape-width scale, not a
+        # mesh scale.  Letting sigma shrink with refinement made peak Rtop
+        # artificially rise as the grid became finer.
+        sigma = max(tape_width * 0.5, 1.0)
         panel_load = _equivalent_panel_load(
             force,
             applied_moment,
             front_center,
             mesh_x,
             mesh_y,
+            nodal_areas,
             sigma,
             assumptions.torsion_coupling,
         )
@@ -927,7 +983,7 @@ def simulate(
     warnings = [
         "이 결과는 보정 전 상대 비교용 축약 모델이며 실제 불량률 또는 안전 판정이 아닙니다.",
         "하면 박리는 노드별 에너지·일·연결성 기준, 상면은 손상 연성 Winkler 기초로 근사합니다.",
-        "gf 시험 폭·각도·속도와 최대 인장력 가정을 실제 계측값으로 보정해야 합니다.",
+        "gf 시험 폭·각도·속도와 장력-신장 가정을 실제 계측값으로 보정해야 합니다.",
         "Z는 패널 표면 Z=0 기준 절대 좌표이며 P1은 테이프 부착 후 정적 평형으로 해석합니다.",
     ]
     if not bool(np.all(bottom_converged)):
@@ -940,7 +996,7 @@ def simulate(
         calibration_version=assumptions.calibration_version,
         condition_name=condition.name,
         resolution=resolution,
-        input_hash=_input_hash(condition, assumptions, resolution),
+        input_hash=_input_hash(condition, assumptions, tension_case, resolution),
         initial_state_mode=initial_state_mode,
         main_trajectory_start_index=main_start_index,
         trajectory_waypoint_indices=main_waypoint_indices.tolist(),
@@ -955,6 +1011,11 @@ def simulate(
         moment_xyz_n_mm=moment_xyz.tolist(),
         moment_resultant_n_mm=moment_resultant.tolist(),
         pull_force_activation=force_activation.tolist(),
+        tension_n=tension_history.tolist(),
+        tape_span_length_mm=span_history.tolist(),
+        p1_span_length_mm=p1_span,
+        initial_preload_n=tension_case.initial_preload_n,
+        tape_stiffness_n_per_mm=tension_case.tape_stiffness_n_per_mm,
         bottom_peel_ratio=bottom_ratio.tolist(),
         top_peak_risk=peak_risk.tolist(),
         top_risk_area_mm2=risk_area.tolist(),
@@ -976,6 +1037,7 @@ def simulate(
         max_panel_lift_mm=float(max_lift.max(initial=0.0)),
         max_panel_twist_mm=float(twist.max(initial=0.0)),
         max_moment_resultant_n_mm=float(moment_resultant.max(initial=0.0)),
+        max_tension_n=float(tension_history.max(initial=0.0)),
         mesh_shape=(ny, nx),
         mesh_x_mm=mesh_x.tolist(),
         mesh_y_mm=mesh_y.tolist(),

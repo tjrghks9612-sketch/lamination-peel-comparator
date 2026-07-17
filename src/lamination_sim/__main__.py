@@ -34,9 +34,23 @@ def _self_test() -> int:
     )
     if not all(math.isfinite(value) for value in values):
         return 2
+    scenarios = result.tension_scenario_results
+    if len(scenarios) != 9:
+        return 3
+    if any(item.winner not in {"tie", "inconclusive"} for item in scenarios):
+        return 3
+    if any(
+        not math.isclose(item.final_bottom_peel_ratio_a, item.final_bottom_peel_ratio_b)
+        or not math.isclose(item.peak_top_risk_a, item.peak_top_risk_b)
+        for item in scenarios
+    ):
+        return 3
     if (
-        result.winner != "tie"
-        or min(values[2:]) < project.assumptions.bottom_completion_ratio
+        result.tension_wins_a
+        + result.tension_wins_b
+        + result.tension_ties
+        + result.tension_inconclusive
+        != 9
     ):
         return 3
     return 0

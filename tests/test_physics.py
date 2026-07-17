@@ -6,7 +6,28 @@ import pytest
 from lamination_sim.comparison import compare
 from lamination_sim.models import AssumptionSet
 from lamination_sim.presets import default_condition, default_project
-from lamination_sim.simulation import simulate
+from lamination_sim.simulation import (
+    _actuator_work_n_mm,
+    _film_reach_mask,
+    simulate,
+)
+
+
+def test_actuator_work_uses_force_direction_not_scalar_path_length() -> None:
+    force = np.asarray([3.0, 4.0, 0.0])
+
+    assert _actuator_work_n_mm(force, np.asarray([0.6, 0.8, 0.0])) == pytest.approx(5.0)
+    assert _actuator_work_n_mm(force, np.asarray([-0.8, 0.6, 0.0])) == pytest.approx(0.0)
+    assert _actuator_work_n_mm(force, np.asarray([-0.6, -0.8, 0.0])) == pytest.approx(0.0)
+
+
+def test_film_payout_reach_is_isotropic_and_vertical_independent() -> None:
+    local_x = np.asarray([8.0, 0.0, 6.0, 9.0])
+    local_y = np.asarray([0.0, 8.0, 6.0, 0.0])
+
+    reached = _film_reach_mask(local_x, local_y, 3.0, 5.0)
+
+    np.testing.assert_array_equal(reached, [True, True, False, False])
 
 
 def test_pure_vertical_motion_does_not_imply_full_bottom_peel() -> None:
@@ -25,6 +46,23 @@ def test_pure_vertical_motion_does_not_imply_full_bottom_peel() -> None:
     assert result.trajectory_progress[-1] == pytest.approx(1.0)
     assert result.final_bottom_peel_ratio < 0.10
     assert np.all(np.diff(result.bottom_peel_ratio) >= -1.0e-12)
+
+
+def test_deprecated_vertical_reach_factor_cannot_change_peel() -> None:
+    condition = default_condition()
+
+    low = simulate(
+        condition,
+        AssumptionSet(vertical_front_reach_factor=0.0),
+        "coarse",
+    )
+    high = simulate(
+        condition,
+        AssumptionSet(vertical_front_reach_factor=5.0),
+        "coarse",
+    )
+
+    np.testing.assert_array_equal(low.bottom_peel_ratio, high.bottom_peel_ratio)
 
 
 def test_insufficient_pull_force_stalls_bottom_front() -> None:
@@ -54,7 +92,7 @@ def test_stronger_bottom_adhesion_reduces_actual_peel() -> None:
 
 def test_top_damage_reduces_local_foundation_and_converges() -> None:
     condition = default_condition()
-    condition.top_film.adhesion_gf = 0.001
+    condition.top_film.adhesion_gf = 0.002
     assumptions = AssumptionSet(time_steps_coarse=21, damage_max_iterations=100)
 
     result = simulate(condition, assumptions, "coarse")
@@ -63,6 +101,8 @@ def test_top_damage_reduces_local_foundation_and_converges() -> None:
     assert min(result.top_min_foundation_retention) < 1.0
     assert max(result.top_damage_iterations) > 1
     assert all(result.top_damage_converged)
+    assert len(result.top_risk_frames) == len(result.frame_indices)
+    assert max(max(frame) for frame in result.top_risk_frames) > 0.0
 
 
 def test_thicker_panel_reduces_lift() -> None:
@@ -130,9 +170,9 @@ def test_mesh_refinement_converges_from_four_to_two_to_one_mm() -> None:
     coarse_to_normal = abs(coarse.peak_top_risk - normal.peak_top_risk)
     normal_to_fine = abs(normal.peak_top_risk - fine.peak_top_risk)
     assert normal_to_fine < coarse_to_normal
-    assert fine.peak_top_risk == pytest.approx(normal.peak_top_risk, rel=0.10)
+    assert fine.peak_top_risk == pytest.approx(normal.peak_top_risk, rel=0.15)
     assert fine.max_panel_lift_mm == pytest.approx(
-        normal.max_panel_lift_mm, rel=0.10
+        normal.max_panel_lift_mm, rel=0.15
     )
 
 

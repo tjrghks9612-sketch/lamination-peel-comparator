@@ -38,6 +38,39 @@ def _compact(value: float) -> str:
     return f"{value:.2f}"
 
 
+def _time_bracket(times: list[float], selected_time: float) -> tuple[int, int, float]:
+    """Return causal interpolation indices and fraction for a physical time."""
+
+    if len(times) <= 1 or selected_time <= times[0]:
+        return (0, 0, 0.0)
+    if selected_time >= times[-1]:
+        last = len(times) - 1
+        return (last, last, 0.0)
+    low = 0
+    high = len(times) - 1
+    while high - low > 1:
+        middle = (low + high) // 2
+        if times[middle] <= selected_time:
+            low = middle
+        else:
+            high = middle
+    span = times[high] - times[low]
+    fraction = 0.0 if span <= 0.0 else (selected_time - times[low]) / span
+    return (low, high, max(0.0, min(1.0, fraction)))
+
+
+def _interpolate_at_time(
+    times: list[float], values: list[float], selected_time: float, fallback: float = 0.0
+) -> float:
+    if not values:
+        return fallback
+    if not times or len(times) != len(values):
+        index = min(len(values) - 1, round(max(0.0, min(1.0, selected_time)) * (len(values) - 1)))
+        return values[index]
+    first, second, fraction = _time_bracket(times, selected_time)
+    return _lerp(values[first], values[second], fraction)
+
+
 class PeelView(QWidget):
     """Top-down engineering view with a compact pseudo-3D peeled-film cue."""
 
@@ -50,6 +83,8 @@ class PeelView(QWidget):
         self.condition: Any = None
         self.result: Any = None
         self.progress = 0.0
+        self.selected_time_s = 0.0
+        self.z_reference_mm = 1.0
         self.setMinimumSize(330, 330)
         self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
         self.setToolTip("마우스 휠 또는 하단 타임라인으로 프레임을 이동합니다.")
@@ -58,10 +93,25 @@ class PeelView(QWidget):
         self.condition = condition
         self.result = result
         self.progress = 0.0
+        times = result_series(result, "time")
+        self.selected_time_s = times[0] if times else 0.0
         self.update()
 
     def set_progress(self, progress: float) -> None:
         self.progress = max(0.0, min(1.0, float(progress)))
+        times = result_series(self.result, "time")
+        if times:
+            self.selected_time_s = _lerp(times[0], times[-1], self.progress)
+        self.update()
+
+    def set_time(self, selected_time_s: float, global_progress: float | None = None) -> None:
+        self.selected_time_s = float(selected_time_s)
+        if global_progress is not None:
+            self.progress = max(0.0, min(1.0, float(global_progress)))
+        self.update()
+
+    def set_z_reference(self, maximum_absolute_z_mm: float) -> None:
+        self.z_reference_mm = max(float(maximum_absolute_z_mm), 1.0e-9)
         self.update()
 
     def wheelEvent(self, event) -> None:  # noqa: N802 - Qt API
@@ -111,8 +161,8 @@ class PeelView(QWidget):
 
         time_values = result_series(self.result, "time")
         if time_values:
-            idx = min(len(time_values) - 1, round(self.progress * (len(time_values) - 1)))
-            text = f"{time_values[idx]:.3f} s"
+            shown_time = max(time_values[0], min(time_values[-1], self.selected_time_s))
+            text = f"{shown_time:.3f} s"
         else:
             text = f"{self.progress * 100:.0f}%"
         painter.setPen(color("text_muted"))
@@ -178,7 +228,7 @@ class PeelView(QWidget):
         painter.restore()
 
     def _draw_risk_field(self, painter: QPainter, rect: QRectF) -> None:
-        grid = self._frame_grid("top_damage_frames", "top_risk_frames", "risk_frames")
+        grid = self._frame_grid("top_risk_frames", "risk_frames", "top_damage_frames")
         if grid:
             rows = len(grid)
             columns = max((len(row) for row in grid), default=0)
@@ -189,12 +239,13 @@ class PeelView(QWidget):
                 painter.setClipPath(clip)
                 cell_w = rect.width() / max(1, columns)
                 cell_h = rect.height() / max(1, rows)
-                max_value = max((_float(v) for row in grid for v in row), default=1.0)
-                max_value = max(max_value, 1e-9)
                 for row_index, row in enumerate(grid):
                     for column_index, value in enumerate(row):
-                        level = max(0.0, min(1.0, _float(value) / max_value))
-                        if level <= 0.015:
+                        # Rtop=1 is the physical threshold. A square-root visual
+                        # transfer keeps subcritical fields visible without
+                        # normalizing every frame to an artificial red maximum.
+                        level = math.sqrt(max(0.0, min(1.0, _float(value))))
+                        if level <= 0.01:
                             continue
                         risk_color = self._risk_color(level)
                         risk_color.setAlpha(int(35 + level * 155))
@@ -211,15 +262,14 @@ class PeelView(QWidget):
                 return
 
         risk_values = result_series(self.result, "top_risk")
-        risk = self._series_value(risk_values, self.progress)
+        risk = self._result_series_value(risk_values)
         if risk <= 0:
             return
-        trajectory = self._trajectory()
-        current = self._trajectory_position(trajectory, self.progress)
+        current = self._result_position()
         panel = get_value(self.condition, "panel", default={})
         width_mm = max(1.0, _float(get_value(panel, "width_mm", default=71.5), 71.5))
         height_mm = max(1.0, _float(get_value(panel, "height_mm", default=149.6), 149.6))
-        center = self._map_xy(current[0], current[1], rect, width_mm, height_mm)
+        center = self._map_extended_xy(current[0], current[1], rect, width_mm, height_mm)
         radius = max(22.0, min(rect.width(), rect.height()) * 0.23)
         radial = QLinearGradient(center - QPointF(radius, radius), center + QPointF(radius, radius))
         c = self._risk_color(min(1.0, risk))
@@ -240,7 +290,7 @@ class PeelView(QWidget):
         height_mm: float,
     ) -> None:
         peel_values = result_series(self.result, "bottom_peel")
-        peel = self._series_value(peel_values, self.progress, self.progress)
+        peel = self._result_series_value(peel_values, self.progress)
         peel = max(0.0, min(1.0, peel))
         corner = get_value(
             get_value(self.condition, "pull_tape", default={}),
@@ -250,11 +300,27 @@ class PeelView(QWidget):
         p1, p2 = self._result_front_line(
             rect, width_mm, height_mm, peel, str(corner)
         )
-        current_xyz = self._trajectory_position(self._trajectory(), self.progress)
-        grip = self._map_xy(current_xyz[0], current_xyz[1], rect, width_mm, height_mm)
-        z_scale = min(34.0, abs(current_xyz[2]) * 1.5)
-        grip_lifted = grip + QPointF(z_scale * 0.35, -z_scale)
+        current_xyz = self._result_position()
+        grip = self._map_extended_xy(current_xyz[0], current_xyz[1], rect, width_mm, height_mm)
+        z_scale = 34.0 * min(1.0, abs(current_xyz[2]) / self.z_reference_mm)
+        vertical_room = max(grip.y() - 46.0, 0.0)
+        shown_vertical_lift = min(z_scale, vertical_room)
+        compressed_lift = z_scale - shown_vertical_lift
+        grip_lifted = grip + QPointF(
+            z_scale * 0.35 + compressed_lift * 0.65,
+            -shown_vertical_lift,
+        )
         midpoint = QPointF((p1.x() + p2.x()) / 2, (p1.y() + p2.y()) / 2)
+
+        if math.hypot(p2.x() - p1.x(), p2.y() - p1.y()) < 1.0:
+            # At an unresolved point front (including completed peel), a
+            # closed pseudo-sheet degenerates into a misleading triangle.
+            painter.setPen(QPen(QColor(COLORS["b"]), 1.4, Qt.PenStyle.DashLine))
+            painter.drawLine(p1, grip_lifted)
+            painter.setPen(Qt.PenStyle.NoPen)
+            painter.setBrush(QColor(COLORS["b"]))
+            painter.drawEllipse(grip_lifted, 4.5, 4.5)
+            return
 
         film = QPainterPath()
         film.moveTo(p1)
@@ -281,22 +347,35 @@ class PeelView(QWidget):
         width_mm: float,
         height_mm: float,
     ) -> None:
-        trajectory = self._trajectory()
-        if len(trajectory) < 2:
+        x_values = result_series(self.result, "position_x")
+        y_values = result_series(self.result, "position_y")
+        if len(x_values) < 2 or len(x_values) != len(y_values):
+            trajectory = self._trajectory()
+            x_values = [point[0] for point in trajectory]
+            y_values = [point[1] for point in trajectory]
+        if len(x_values) < 2:
             return
-        points = [self._map_xy(x, y, rect, width_mm, height_mm) for x, y, _z, _speed in trajectory]
+        stride = max(1, len(x_values) // 180)
+        sample_indices = list(range(0, len(x_values), stride))
+        if sample_indices[-1] != len(x_values) - 1:
+            sample_indices.append(len(x_values) - 1)
+        points = [
+            self._map_extended_xy(x_values[i], y_values[i], rect, width_mm, height_mm)
+            for i in sample_indices
+        ]
         painter.setPen(QPen(self.accent, 1.2, Qt.PenStyle.DashLine))
         painter.drawPolyline(QPolygonF(points))
         painter.setPen(Qt.PenStyle.NoPen)
-        for index, point in enumerate(points):
-            painter.setBrush(self.accent if index else QColor("#F4F7FB"))
-            painter.drawEllipse(point, 2.6, 2.6)
+        painter.setBrush(QColor("#F4F7FB"))
+        painter.drawEllipse(points[0], 2.6, 2.6)
+        painter.setBrush(self.accent)
+        painter.drawEllipse(points[-1], 2.6, 2.6)
 
     def _draw_footer(self, painter: QPainter) -> None:
         risk_values = result_series(self.result, "top_risk")
         peel_values = result_series(self.result, "bottom_peel")
-        risk = self._series_value(risk_values, self.progress)
-        peel = self._series_value(peel_values, self.progress, self.progress)
+        risk = self._result_series_value(risk_values)
+        peel = self._result_series_value(peel_values, self.progress)
         risk_text = f"Rtop {_compact(risk)}" if risk_values else "Rtop —"
         peel_text = f"하면 박리 {peel * 100:.0f}%"
         y = self.height() - 27
@@ -326,6 +405,21 @@ class PeelView(QWidget):
             )
         return result
 
+    def _result_position(self) -> tuple[float, float, float, float]:
+        times = result_series(self.result, "time")
+        components = [
+            result_series(self.result, "position_x"),
+            result_series(self.result, "position_y"),
+            result_series(self.result, "position_z"),
+            result_series(self.result, "speed"),
+        ]
+        if times and all(len(values) == len(times) for values in components):
+            return tuple(
+                _interpolate_at_time(times, values, self.selected_time_s)
+                for values in components
+            )  # type: ignore[return-value]
+        return self._trajectory_position(self._trajectory(), self.progress)
+
     @staticmethod
     def _trajectory_position(
         trajectory: list[tuple[float, float, float, float]], progress: float
@@ -347,6 +441,50 @@ class PeelView(QWidget):
         px = rect.left() + max(0.0, min(1.0, x / width_mm)) * rect.width()
         py = rect.bottom() - max(0.0, min(1.0, y / height_mm)) * rect.height()
         return QPointF(px, py)
+
+    def _map_extended_xy(
+        self,
+        x: float,
+        y: float,
+        rect: QRectF,
+        width_mm: float,
+        height_mm: float,
+    ) -> QPointF:
+        """Map off-panel gripper motion into the view without edge pinning."""
+
+        x_values = result_series(self.result, "position_x") or [x]
+        y_values = result_series(self.result, "position_y") or [y]
+        x_min = min(0.0, min(x_values))
+        x_max = max(width_mm, max(x_values))
+        y_min = min(0.0, min(y_values))
+        y_max = max(height_mm, max(y_values))
+        margin = min(28.0, max(10.0, rect.left() - 4.0))
+
+        def extended(
+            value: float,
+            lower: float,
+            upper: float,
+            pixel_low: float,
+            pixel_high: float,
+            high_overflow: float,
+        ) -> float:
+            direction = 1.0 if pixel_high >= pixel_low else -1.0
+            if 0.0 <= value <= upper:
+                return pixel_low + value / upper * (pixel_high - pixel_low)
+            if value < 0.0:
+                span = max(-lower, 1.0e-12)
+                return pixel_low - direction * margin * min(1.0, -value / span)
+            span = max(high_overflow, 1.0e-12)
+            return pixel_high + direction * margin * min(1.0, (value - upper) / span)
+
+        px = extended(
+            x, x_min, width_mm, rect.left(), rect.right(), x_max - width_mm
+        )
+        # Y pixels run downward, so compute the physical-axis map then invert.
+        py_up = extended(
+            y, y_min, height_mm, rect.bottom(), rect.top(), y_max - height_mm
+        )
+        return QPointF(px, py_up)
 
     @staticmethod
     def _front_line(rect: QRectF, progress: float, corner: str) -> tuple[QPointF, QPointF]:
@@ -383,11 +521,21 @@ class PeelView(QWidget):
             )
         )
         if segments:
-            index = min(
-                len(segments) - 1,
-                round(self.progress * (len(segments) - 1)),
-            )
-            segment = sequence(segments[index])
+            times = result_series(self.result, "time")
+            if len(times) == len(segments):
+                first, second, fraction = _time_bracket(times, self.selected_time_s)
+                left = sequence(segments[first])
+                right = sequence(segments[second])
+                segment = [
+                    _lerp(_float(left[i]), _float(right[i]), fraction)
+                    for i in range(min(len(left), len(right)))
+                ]
+            else:
+                index = min(
+                    len(segments) - 1,
+                    round(self.progress * (len(segments) - 1)),
+                )
+                segment = sequence(segments[index])
             if len(segment) >= 4:
                 return (
                     self._map_xy(
@@ -411,7 +559,16 @@ class PeelView(QWidget):
         frames = sequence(get_value(self.result, *names, default=[]))
         if not frames:
             return []
-        index = min(len(frames) - 1, round(self.progress * (len(frames) - 1)))
+        frame_indices = [int(value) for value in sequence(get_value(self.result, "frame_indices", default=[]))]
+        times = result_series(self.result, "time")
+        if len(frame_indices) == len(frames) and times:
+            frame_times = [times[min(max(index, 0), len(times) - 1)] for index in frame_indices]
+            index = min(
+                range(len(frame_times)),
+                key=lambda item: abs(frame_times[item] - self.selected_time_s),
+            )
+        else:
+            index = min(len(frames) - 1, round(self.progress * (len(frames) - 1)))
         frame = frames[index]
         if hasattr(frame, "tolist"):
             try:
@@ -445,6 +602,14 @@ class PeelView(QWidget):
             return fallback
         index = min(len(values) - 1, round(progress * (len(values) - 1)))
         return values[index]
+
+    def _result_series_value(self, values: list[float], fallback: float = 0.0) -> float:
+        return _interpolate_at_time(
+            result_series(self.result, "time"),
+            values,
+            self.selected_time_s,
+            fallback,
+        )
 
     @staticmethod
     def _risk_color(level: float) -> QColor:
@@ -481,6 +646,9 @@ class LineChart(QWidget):
         self.result_a: Any = None
         self.result_b: Any = None
         self.progress = 0.0
+        self.selected_time_s = 0.0
+        self.time_start_s = 0.0
+        self.time_end_s = 1.0
         self.setMinimumHeight(190)
 
     def set_results(self, result_a: Any, result_b: Any) -> None:
@@ -490,6 +658,20 @@ class LineChart(QWidget):
 
     def set_progress(self, progress: float) -> None:
         self.progress = max(0.0, min(1.0, progress))
+        self.selected_time_s = _lerp(
+            self.time_start_s, self.time_end_s, self.progress
+        )
+        self.update()
+
+    def set_time_range(self, start_s: float, end_s: float) -> None:
+        self.time_start_s = float(start_s)
+        self.time_end_s = max(float(end_s), self.time_start_s + 1.0e-12)
+        self.update()
+
+    def set_time(self, selected_time_s: float, global_progress: float | None = None) -> None:
+        self.selected_time_s = float(selected_time_s)
+        if global_progress is not None:
+            self.progress = max(0.0, min(1.0, float(global_progress)))
         self.update()
 
     def paintEvent(self, _event) -> None:  # noqa: N802
@@ -525,9 +707,28 @@ class LineChart(QWidget):
             maximum += pad
 
         self._draw_grid(painter, plot, minimum, maximum)
-        self._draw_series(painter, plot, data_a, minimum, maximum, QColor(COLORS["a"]))
-        self._draw_series(painter, plot, data_b, minimum, maximum, QColor(COLORS["b"]))
-        cursor_x = plot.left() + self.progress * plot.width()
+        self._draw_series(
+            painter,
+            plot,
+            result_series(self.result_a, "time"),
+            data_a,
+            minimum,
+            maximum,
+            QColor(COLORS["a"]),
+        )
+        self._draw_series(
+            painter,
+            plot,
+            result_series(self.result_b, "time"),
+            data_b,
+            minimum,
+            maximum,
+            QColor(COLORS["b"]),
+        )
+        cursor_fraction = (self.selected_time_s - self.time_start_s) / (
+            self.time_end_s - self.time_start_s
+        )
+        cursor_x = plot.left() + max(0.0, min(1.0, cursor_fraction)) * plot.width()
         painter.setPen(QPen(QColor(255, 255, 255, 65), 1, Qt.PenStyle.DashLine))
         painter.drawLine(QPointF(cursor_x, plot.top()), QPointF(cursor_x, plot.bottom()))
         self._draw_legend(painter)
@@ -547,10 +748,11 @@ class LineChart(QWidget):
             )
             painter.setPen(QPen(color("grid", 110), 0.8))
 
-    @staticmethod
     def _draw_series(
+        self,
         painter: QPainter,
         plot: QRectF,
+        times: list[float],
         values: list[float],
         minimum: float,
         maximum: float,
@@ -560,7 +762,13 @@ class LineChart(QWidget):
             return
         path = QPainterPath()
         for index, value in enumerate(values):
-            x = plot.left() + (index / max(1, len(values) - 1)) * plot.width()
+            if len(times) == len(values):
+                time_fraction = (times[index] - self.time_start_s) / (
+                    self.time_end_s - self.time_start_s
+                )
+            else:
+                time_fraction = index / max(1, len(values) - 1)
+            x = plot.left() + max(0.0, min(1.0, time_fraction)) * plot.width()
             y = plot.bottom() - ((value - minimum) / (maximum - minimum)) * plot.height()
             if index == 0:
                 path.moveTo(x, y)

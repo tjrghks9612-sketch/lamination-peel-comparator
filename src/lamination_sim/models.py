@@ -156,7 +156,15 @@ class AssumptionSet(_StrictModel):
     psa_modulus_mpa: float = Field(default=0.5, gt=0.0, le=1000.0)
     max_pull_force_n: float = Field(default=20.0, gt=0.0, le=10000.0)
     mixed_mode_shear_weight: float = Field(default=1.0, ge=0.0, le=10.0)
-    vertical_front_reach_factor: float = Field(default=0.25, ge=0.0, le=5.0)
+    vertical_front_reach_factor: float = Field(
+        default=0.25,
+        ge=0.0,
+        le=5.0,
+        description=(
+            "Deprecated compatibility field. cohesive-v4-film-payout ignores "
+            "this value because vertical travel does not create free interface reach."
+        ),
+    )
     cohesive_stiffness_floor_ratio: float = Field(
         default=0.01, gt=0.0, le=0.25
     )

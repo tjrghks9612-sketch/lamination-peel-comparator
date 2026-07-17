@@ -25,7 +25,7 @@ from .trajectory import interpolate_trajectory
 
 
 Resolution = Literal["coarse", "normal", "fine"]
-MODEL_VERSION = "cohesive-v3-causal"
+MODEL_VERSION = "cohesive-v4-film-payout"
 FloatArray = NDArray[np.float64]
 
 
@@ -82,6 +82,7 @@ class SimulationResult(BaseModel):
     panel_z_frames_mm: list[list[float]]
     bottom_damage_frames: list[list[float]]
     top_damage_frames: list[list[float]]
+    top_risk_frames: list[list[float]]
     front_segments_mm: list[list[float]]
     warnings: list[str] = Field(default_factory=list)
 
@@ -305,26 +306,30 @@ def _frontier_mask(
     return (partial | (intact & adjacent)).ravel()
 
 
-def _kinematic_reach_mask(
+def _film_reach_mask(
     local_x: FloatArray,
     local_y: FloatArray,
-    gripper: FloatArray,
-    start_gripper: FloatArray,
-    corner: str,
+    cumulative_in_plane_travel_mm: float,
     tape_width: float,
-    assumptions: AssumptionSet,
 ) -> NDArray[np.bool_]:
-    x_sign = -1.0 if "right" in corner else 1.0
-    y_sign = -1.0 if "top" in corner else 1.0
-    x_travel = max(x_sign * float(gripper[0] - start_gripper[0]), 0.0)
-    y_travel = max(y_sign * float(gripper[1] - start_gripper[1]), 0.0)
-    z_lift = max(float(gripper[2] - start_gripper[2]), 0.0)
-    vertical_reach = assumptions.vertical_front_reach_factor * z_lift
-    reach_x = tape_width + x_travel + vertical_reach
-    reach_y = tape_width + y_travel + vertical_reach
-    return (local_x <= reach_x + 1.0e-12) & (
-        local_y <= reach_y + 1.0e-12
-    )
+    """Causal inextensible-film payout envelope from the attached corner.
+
+    The old rectangular mask independently converted positive X, Y and Z
+    travel into peeled dimensions.  That made vertical motion create free
+    interfacial reach and made the answer depend strongly on panel axes.  The
+    reduced-order replacement only pays out the measured cumulative in-plane
+    gripper travel.  Cohesive damage and the connected frontier still decide
+    which nodes inside this isotropic geodesic envelope actually peel.
+    """
+
+    reach = max(tape_width + cumulative_in_plane_travel_mm, tape_width)
+    return np.hypot(local_x, local_y) <= reach + 1.0e-12
+
+
+def _actuator_work_n_mm(force_xyz_n: FloatArray, displacement_xyz_mm: FloatArray) -> float:
+    """Positive incremental actuator work; transverse/reverse motion adds none."""
+
+    return max(float(np.dot(force_xyz_n, displacement_xyz_mm)), 0.0)
 
 
 def _front_mechanics(
@@ -661,9 +666,6 @@ def simulate(
         condition.pull_tape.start_corner,
     )
     seed = _seed_mask(local_x, local_y, x, y, tape_width)
-    approach_start_gripper = trajectory.xyz_mm[0].copy()
-    p1_gripper = trajectory.xyz_mm[main_start_index].copy()
-
     frame_indices = np.unique(
         np.linspace(0, steps - 1, min(requested_frames, steps), dtype=int)
     )
@@ -671,6 +673,7 @@ def simulate(
     panel_frames: list[list[float]] = []
     bottom_damage_frames: list[list[float]] = []
     top_damage_frames: list[list[float]] = []
+    top_risk_frames: list[list[float]] = []
 
     force_xyz = np.zeros((steps, 3), dtype=float)
     force_resultant = np.zeros(steps, dtype=float)
@@ -693,28 +696,26 @@ def simulate(
 
     tolerance = assumptions.damage_convergence_tolerance
     max_iterations = assumptions.damage_max_iterations
+    cumulative_in_plane_travel = 0.0
 
     for index in range(steps):
         gripper = trajectory.xyz_mm[index]
         previous_gripper = (
             trajectory.xyz_mm[index - 1] if index else trajectory.xyz_mm[0]
         )
-        path_increment = float(np.linalg.norm(gripper - previous_gripper))
+        gripper_increment = gripper - previous_gripper
+        cumulative_in_plane_travel += float(
+            np.linalg.norm(gripper_increment[:2])
+        )
         # P1 is a held, tape-attached equilibrium state.  Unknown pre-P1 motion
         # is never inferred from P1's absolute Z, so the actuator capacity is
         # present at t=0 while zero path increment prevents artificial damage.
         available_force = assumptions.max_pull_force_n
-        reach_origin = (
-            approach_start_gripper if index < main_start_index else p1_gripper
-        )
-        kinematic_mask = _kinematic_reach_mask(
+        kinematic_mask = _film_reach_mask(
             local_x,
             local_y,
-            gripper,
-            reach_origin,
-            condition.pull_tape.start_corner,
+            cumulative_in_plane_travel,
             tape_width,
-            assumptions,
         )
         gamma_bottom = _adhesion_energy_n_per_mm(
             condition.bottom_film.adhesion_gf,
@@ -739,7 +740,9 @@ def simulate(
             panel_diagonal,
             assumptions,
         )
-        work_remaining = mechanics.scalar_reaction_n * path_increment
+        work_remaining = _actuator_work_n_mm(
+            mechanics.force_xyz, gripper_increment
+        )
         converged = True
         for iteration in range(1, max_iterations + 1):
             bottom_iterations[index] = iteration
@@ -793,6 +796,20 @@ def simulate(
                 work_remaining > 1.0e-15
                 and np.any(mechanics.drive_ratio >= 1.0)
             )
+        # Treat a residual smaller than the declared damage tolerance as the
+        # fully failed cohesive state.  This avoids reporting 99.975% solely
+        # because the last node retained a sub-tolerance numerical sliver.
+        bottom_damage[bottom_damage >= 1.0 - tolerance] = 1.0
+        unresolved_area = float(np.dot(1.0 - bottom_damage, nodal_areas))
+        if (
+            unresolved_area / panel_area <= tolerance
+            or unresolved_area
+            <= 2.0 * float(nodal_areas.max(initial=0.0)) + 1.0e-12
+        ):
+            # A sub-tolerance area fraction (or residual below two nodal
+            # control areas) cannot span a resolved front. Close it as
+            # mesh-complete.
+            bottom_damage.fill(1.0)
         bottom_converged[index] = converged
 
         mechanics = _front_mechanics(
@@ -901,6 +918,7 @@ def simulate(
             panel_frames.append(displacement.tolist())
             bottom_damage_frames.append(bottom_damage.tolist())
             top_damage_frames.append(top_damage.tolist())
+            top_risk_frames.append(local_risk.tolist())
 
     peak_index = int(np.argmax(peak_risk))
     exceedance_duration = float(
@@ -965,6 +983,7 @@ def simulate(
         panel_z_frames_mm=panel_frames,
         bottom_damage_frames=bottom_damage_frames,
         top_damage_frames=top_damage_frames,
+        top_risk_frames=top_risk_frames,
         front_segments_mm=fronts.tolist(),
         warnings=warnings,
     )

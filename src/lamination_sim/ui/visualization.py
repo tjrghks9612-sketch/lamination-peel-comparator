@@ -458,16 +458,21 @@ def _film_fold_world_grid(
     pull_tape_length_mm: float = 10.0,
     front_damage_grid: list[list[float]] | None = None,
     follow_delta_xyz_mm: tuple[float, float, float] = (0.0, 0.0, 0.0),
+    mesh_subdivisions: int = 1,
 ) -> list[list[tuple[tuple[float, float, float], float, float]]]:
-    """Build a visualization-only, head-driven laid-down U peel shape.
+    """Build the visualization-only film body for a laid-down 180-degree peel.
 
-    The damage=0.5 contour remains the physical display front, but every strip
-    folds in one common front-to-head direction.  This prevents a diagonal
-    front from producing the fan/tent shape caused by per-vertex local normals.
-    The final fifth of the tail narrows to the pull-tape width and joins the
-    tape one configured tape length before the grip.  These coordinates never
-    participate in cohesive damage, force, or actuator-work calculations.
+    The damage=0.5 contour remains the physical display front.  Every detached
+    material strip folds around a short semicircle and then returns above the
+    panel while retaining its original lateral coordinate.  In particular,
+    the film body is never narrowed or pulled to the grip: the separate pull-
+    tape ribbon is solely responsible for connecting the film to the head.
+    These coordinates never participate in cohesive damage, force, or work.
     """
+
+    # Tape width never deforms the film body.  Tape length only places the
+    # display free edge behind the head; both remain visualization-only inputs.
+    del pull_tape_width_mm
 
     grid = [list(row) for row in damage_grid if row]
     if not grid:
@@ -481,20 +486,40 @@ def _film_fold_world_grid(
         columns = 2
     elif columns > 1:
         grid = [row[:columns] for row in grid]
+
+    def refined(source: list[list[float]]) -> list[list[float]]:
+        subdivisions = max(1, int(mesh_subdivisions))
+        if subdivisions == 1 or len(source) < 2 or len(source[0]) < 2:
+            return source
+        target_rows = min(96, (len(source) - 1) * subdivisions + 1)
+        target_columns = min(64, (len(source[0]) - 1) * subdivisions + 1)
+        return [
+            [
+                _sample_normalized_grid(
+                    source,
+                    column / max(target_columns - 1, 1),
+                    row / max(target_rows - 1, 1),
+                )
+                for column in range(target_columns)
+            ]
+            for row in range(target_rows)
+        ]
+
+    grid = refined(grid)
     rows = len(grid)
+    columns = len(grid[0])
 
     width = max(float(width_mm), 1.0e-9)
     height = max(float(height_mm), 1.0e-9)
-    contour_source = front_damage_grid if front_damage_grid else grid
+    contour_source = (
+        refined([list(row) for row in front_damage_grid if row])
+        if front_damage_grid
+        else grid
+    )
     contour = _damage_contour_segments(contour_source)
     all_detached = all(_float(value) >= 0.5 for row in grid for value in row)
-    opposite = (
-        width if "right" not in corner else 0.0,
-        height if "top" not in corner else 0.0,
-    )
-    # Once the last bonded node releases there is no current threshold contour.
-    # Its limiting position is the opposite corner, which keeps the final frame
-    # a single folded sheet instead of snapping back to a rigid translation.
+    starts_at_top = "top" in corner
+    propagation = -1.0 if starts_at_top else 1.0
     front_segments_mm = [
         (
             (start[0] * width, start[1] * height),
@@ -502,116 +527,41 @@ def _film_fold_world_grid(
         )
         for start, end in contour
     ]
-    if not front_segments_mm and all_detached:
-        front_segments_mm = [(opposite, opposite)]
+    if all_detached:
+        limiting_y = 0.0 if starts_at_top else height
+        front_segments_mm = [((0.0, limiting_y), (width, limiting_y))]
 
-    start_corner = (
-        width if "right" in corner else 0.0,
-        height if "top" in corner else 0.0,
-    )
-    fold_radius = max(2.5, min(7.0, 0.04 * math.hypot(width, height)))
+    fold_radius = max(1.5, min(4.0, 0.025 * math.hypot(width, height)))
     arc_length = math.pi * fold_radius
-    front_points = [point for segment in front_segments_mm for point in segment]
-    front_center = (
-        sum(point[0] for point in front_points) / max(len(front_points), 1),
-        sum(point[1] for point in front_points) / max(len(front_points), 1),
-    )
-    head_direction = (
-        grip_xyz_mm[0] - front_center[0],
-        grip_xyz_mm[1] - front_center[1],
-    )
-    head_distance = math.hypot(*head_direction)
-    if head_distance <= 1.0e-9:
-        head_direction = (
-            opposite[0] - start_corner[0],
-            opposite[1] - start_corner[1],
-        )
-        head_distance = max(math.hypot(*head_direction), 1.0e-9)
-    tangent = (head_direction[0] / head_distance, head_direction[1] / head_distance)
-    lateral_axis = (-tangent[1], tangent[0])
+    endpoints = [point for segment in front_segments_mm for point in segment]
 
-    def coordinates(point: tuple[float, float]) -> tuple[float, float]:
-        return (
-            point[0] * tangent[0] + point[1] * tangent[1],
-            point[0] * lateral_axis[0] + point[1] * lateral_axis[1],
-        )
-
-    front_coordinates = [
-        (coordinates(first), coordinates(second))
-        for first, second in front_segments_mm
-    ]
-
-    def front_station(lateral: float, material_station: float) -> float:
+    def front_y_at(x: float) -> float:
         crossings: list[float] = []
-        endpoints: list[tuple[float, float]] = []
-        for (station_a, lateral_a), (station_b, lateral_b) in front_coordinates:
-            endpoints.extend(((station_a, lateral_a), (station_b, lateral_b)))
-            lateral_delta = lateral_b - lateral_a
-            if abs(lateral_delta) <= 1.0e-12:
-                if abs(lateral - lateral_a) <= 1.0e-9:
-                    crossings.extend((station_a, station_b))
+        for (x_a, y_a), (x_b, y_b) in front_segments_mm:
+            x_delta = x_b - x_a
+            if abs(x_delta) <= 1.0e-12:
+                if abs(x - x_a) <= 1.0e-9:
+                    crossings.extend((y_a, y_b))
                 continue
-            fraction = (lateral - lateral_a) / lateral_delta
+            fraction = (x - x_a) / x_delta
             if -1.0e-9 <= fraction <= 1.0 + 1.0e-9:
-                crossings.append(_lerp(station_a, station_b, max(0.0, min(1.0, fraction))))
+                crossings.append(_lerp(y_a, y_b, max(0.0, min(1.0, fraction))))
         if crossings:
-            ahead = [value for value in crossings if value >= material_station - 1.0e-9]
-            return min(ahead) if ahead else min(crossings, key=lambda value: abs(value - material_station))
+            return min(crossings) if starts_at_top else max(crossings)
         if endpoints:
-            return min(endpoints, key=lambda value: abs(value[1] - lateral))[0]
-        return coordinates(opposite)[0]
+            return min(endpoints, key=lambda point: abs(point[0] - x))[1]
+        return height if starts_at_top else 0.0
 
-    def folded_point(
-        x: float, y: float
-    ) -> tuple[tuple[float, float, float], float, float]:
-        material_station, lateral = coordinates((x, y))
-        station = front_station(lateral, material_station)
-        distance = max(station - material_station, 0.0)
-        fx = station * tangent[0] + lateral * lateral_axis[0]
-        fy = station * tangent[1] + lateral * lateral_axis[1]
-        if distance <= arc_length:
-            angle = distance / fold_radius
-            along = fold_radius * math.sin(angle)
-            return (
-                (
-                    fx - tangent[0] * along,
-                    fy - tangent[1] * along,
-                    fold_radius * (1.0 - math.cos(angle)),
-                ),
-                distance,
-                lateral,
-            )
-        tail = distance - arc_length
-        return (
-            (
-                fx + tangent[0] * tail,
-                fy + tangent[1] * tail,
-                2.0 * fold_radius,
-            ),
-            distance,
-            lateral,
-        )
-
-    anchor_point, anchor_distance, anchor_lateral = folded_point(*start_corner)
-    grip_x, grip_y, grip_z = grip_xyz_mm
-    tape_attachment = (
-        grip_x - tangent[0] * max(0.0, pull_tape_length_mm),
-        grip_y - tangent[1] * max(0.0, pull_tape_length_mm),
-        max(0.0, grip_z),
-    )
-    anchor_delta = (
-        tape_attachment[0] - anchor_point[0],
-        tape_attachment[1] - anchor_point[1],
-        tape_attachment[2] - anchor_point[2],
-    )
-    longitudinal_correction = anchor_delta[0] * tangent[0] + anchor_delta[1] * tangent[1]
-    lateral_correction = anchor_delta[0] * lateral_axis[0] + anchor_delta[1] * lateral_axis[1]
-    panel_laterals = [
-        coordinates(point)[1]
-        for point in ((0.0, 0.0), (width, 0.0), (width, height), (0.0, height))
+    front_samples = [
+        front_y_at(column / max(columns - 1, 1) * width)
+        for column in range(columns)
     ]
-    panel_lateral_span = max(max(panel_laterals) - min(panel_laterals), 1.0e-9)
-    tape_width_scale = min(1.0, max(0.0, pull_tape_width_mm) / panel_lateral_span)
+    grip_y = float(grip_xyz_mm[1])
+    requested_tail_y = grip_y - propagation * max(0.0, float(pull_tape_length_mm))
+    if starts_at_top:
+        target_tail_y = min(requested_tail_y, min(front_samples) - 2.0 * fold_radius)
+    else:
+        target_tail_y = max(requested_tail_y, max(front_samples) + 2.0 * fold_radius)
 
     world: list[list[tuple[tuple[float, float, float], float, float]]] = []
     for row, values in enumerate(grid):
@@ -620,32 +570,198 @@ def _film_fold_world_grid(
         for column, value in enumerate(values):
             x = column / (columns - 1) * width
             damage = max(0.0, min(1.0, _float(value)))
-            if damage < 0.5 or not front_segments_mm:
+            if not front_segments_mm:
                 output_row.append(((x, y, 0.0), damage, 0.0))
                 continue
-            point, distance, lateral = folded_point(x, y)
-            tail_progress = distance / max(anchor_distance, fold_radius)
-            weight = max(0.0, min(1.0, (tail_progress - 0.8) / 0.2))
-            weight = _smooth_lift_fraction(weight)
-            lateral_narrowing = (
-                lateral_correction
-                + (lateral - anchor_lateral) * (tape_width_scale - 1.0)
-            )
+            if all_detached:
+                distance_from_free_edge = height - y if starts_at_top else y
+                point = (
+                    x + follow_delta_xyz_mm[0],
+                    target_tail_y
+                    - propagation * distance_from_free_edge
+                    + follow_delta_xyz_mm[1],
+                    max(0.0, 2.0 * fold_radius + follow_delta_xyz_mm[2]),
+                )
+                output_row.append((point, damage, 1.0))
+                continue
+            front_y = front_samples[column]
+            distance = propagation * (front_y - y)
+            if distance < -1.0e-9:
+                output_row.append(((x, y, 0.0), damage, 0.0))
+                continue
+            distance = max(0.0, distance)
+            start_y = height if starts_at_top else 0.0
+            full_tail_distance = max(propagation * (front_y - start_y), 0.0)
+            if distance <= arc_length:
+                angle = distance / fold_radius
+                point = (
+                    x,
+                    front_y - propagation * fold_radius * math.sin(angle),
+                    fold_radius * (1.0 - math.cos(angle)),
+                )
+            else:
+                base_tail_y = front_y + propagation * (distance - arc_length)
+                base_free_y = front_y + propagation * max(
+                    full_tail_distance - arc_length, 0.0
+                )
+                tail_progress = (distance - arc_length) / max(
+                    full_tail_distance - arc_length, 1.0e-9
+                )
+                correction_weight = _smooth_lift_fraction(
+                    max(0.0, min(1.0, tail_progress))
+                )
+                point = (
+                    x,
+                    base_tail_y + (target_tail_y - base_free_y) * correction_weight,
+                    2.0 * fold_radius,
+                )
             point = (
-                point[0]
-                + (tangent[0] * longitudinal_correction + lateral_axis[0] * lateral_narrowing)
-                * weight
-                + follow_delta_xyz_mm[0],
-                point[1]
-                + (tangent[1] * longitudinal_correction + lateral_axis[1] * lateral_narrowing)
-                * weight
-                + follow_delta_xyz_mm[1],
-                max(0.0, point[2] + anchor_delta[2] * weight + follow_delta_xyz_mm[2]),
+                point[0] + follow_delta_xyz_mm[0],
+                point[1] + follow_delta_xyz_mm[1],
+                max(0.0, point[2] + follow_delta_xyz_mm[2]),
             )
             fold_fraction = max(0.0, min(1.0, distance / max(arc_length, 1.0e-9)))
             output_row.append((point, damage, fold_fraction))
         world.append(output_row)
     return world
+
+
+def _sample_film_world_grid(
+    world_grid: list[list[tuple[tuple[float, float, float], float, float]]],
+    x_fraction: float,
+    y_fraction: float,
+) -> tuple[float, float, float]:
+    """Bilinearly sample a material point from the folded film body."""
+
+    if not world_grid or not world_grid[0]:
+        return (0.0, 0.0, 0.0)
+    rows = len(world_grid)
+    columns = min(len(row) for row in world_grid)
+    x_position = max(0.0, min(1.0, x_fraction)) * max(columns - 1, 0)
+    y_position = max(0.0, min(1.0, y_fraction)) * max(rows - 1, 0)
+    left = min(int(math.floor(x_position)), columns - 1)
+    right = min(left + 1, columns - 1)
+    bottom = min(int(math.floor(y_position)), rows - 1)
+    top = min(bottom + 1, rows - 1)
+    x_weight = x_position - left
+    y_weight = y_position - bottom
+
+    def xyz(row: int, column: int) -> tuple[float, float, float]:
+        return world_grid[row][column][0]
+
+    lower = tuple(
+        _lerp(xyz(bottom, left)[axis], xyz(bottom, right)[axis], x_weight)
+        for axis in range(3)
+    )
+    upper = tuple(
+        _lerp(xyz(top, left)[axis], xyz(top, right)[axis], x_weight)
+        for axis in range(3)
+    )
+    return tuple(_lerp(lower[axis], upper[axis], y_weight) for axis in range(3))
+
+
+def _pull_tape_attachment_world(
+    world_grid: list[list[tuple[tuple[float, float, float], float, float]]],
+    width_mm: float,
+    corner: str,
+    pull_tape_width_mm: float,
+    center_x_mm: float | None = None,
+) -> tuple[tuple[float, float, float], tuple[float, float, float]]:
+    """Return an actual-width tape patch tangent to the folded film edge."""
+
+    width = max(float(width_mm), 1.0e-9)
+    tape_width = min(width, max(0.0, float(pull_tape_width_mm)))
+    half_fraction = 0.5 * tape_width / width
+    y_fraction = 1.0 if "top" in corner else 0.0
+    if center_x_mm is not None:
+        center_fraction = max(
+            half_fraction,
+            min(1.0 - half_fraction, float(center_x_mm) / width),
+        )
+    elif "right" in corner:
+        center_fraction = 1.0 - half_fraction
+    else:
+        center_fraction = half_fraction
+    center = _sample_film_world_grid(world_grid, center_fraction, y_fraction)
+    sample_step = max(1.0e-4, min(0.01, half_fraction * 0.25))
+    before = _sample_film_world_grid(
+        world_grid, max(0.0, center_fraction - sample_step), y_fraction
+    )
+    after = _sample_film_world_grid(
+        world_grid, min(1.0, center_fraction + sample_step), y_fraction
+    )
+    tangent = tuple(after[axis] - before[axis] for axis in range(3))
+    tangent_length = math.sqrt(sum(value * value for value in tangent))
+    if tangent_length <= 1.0e-9:
+        tangent = (-1.0, 0.0, 0.0) if "right" in corner else (1.0, 0.0, 0.0)
+        tangent_length = 1.0
+    unit = tuple(value / tangent_length for value in tangent)
+    half_width = tape_width * 0.5
+    return (
+        tuple(center[axis] - unit[axis] * half_width for axis in range(3)),
+        tuple(center[axis] + unit[axis] * half_width for axis in range(3)),
+    )
+
+
+def _pull_tape_world_grid(
+    attachment_edge: tuple[tuple[float, float, float], tuple[float, float, float]],
+    grip_xyz_mm: tuple[float, float, float],
+    *,
+    segments: int = 12,
+    head_clearance_mm: float = 3.0,
+) -> list[list[tuple[float, float, float]]]:
+    """Build a separate, constant-width 3-D ribbon from film to head jaw."""
+
+    first, second = attachment_edge
+    start_center = tuple((first[axis] + second[axis]) * 0.5 for axis in range(3))
+    start_half = tuple((second[axis] - first[axis]) * 0.5 for axis in range(3))
+    tape_width = max(2.0 * math.sqrt(sum(value * value for value in start_half)), 1.0e-9)
+    axis = tuple(grip_xyz_mm[index] - start_center[index] for index in range(3))
+    distance = math.sqrt(sum(value * value for value in axis))
+    if distance <= 1.0e-9:
+        return [[first, second], [first, second]]
+    axis_unit = tuple(value / distance for value in axis)
+    clearance = min(max(0.0, float(head_clearance_mm)), distance * 0.25)
+    end_center = tuple(
+        grip_xyz_mm[index] - axis_unit[index] * clearance for index in range(3)
+    )
+    parallel = sum(start_half[index] * axis_unit[index] for index in range(3))
+    end_half = tuple(
+        start_half[index] - parallel * axis_unit[index] for index in range(3)
+    )
+    end_half_length = math.sqrt(sum(value * value for value in end_half))
+    if end_half_length <= 1.0e-9:
+        candidate = (-axis_unit[1], axis_unit[0], 0.0)
+        candidate_length = math.sqrt(sum(value * value for value in candidate))
+        if candidate_length <= 1.0e-9:
+            candidate = (1.0, 0.0, 0.0)
+            candidate_length = 1.0
+        end_half = tuple(value / candidate_length for value in candidate)
+    else:
+        end_half = tuple(value / end_half_length for value in end_half)
+    end_half = tuple(value * tape_width * 0.5 for value in end_half)
+
+    output: list[list[tuple[float, float, float]]] = []
+    for index in range(max(2, int(segments)) + 1):
+        fraction = index / max(2, int(segments))
+        center = tuple(
+            _lerp(start_center[axis_index], end_center[axis_index], fraction)
+            for axis_index in range(3)
+        )
+        half = tuple(
+            _lerp(start_half[axis_index], end_half[axis_index], fraction)
+            for axis_index in range(3)
+        )
+        half_length = math.sqrt(sum(value * value for value in half))
+        if half_length > 1.0e-9:
+            half = tuple(value / half_length * tape_width * 0.5 for value in half)
+        output.append(
+            [
+                tuple(center[axis_index] - half[axis_index] for axis_index in range(3)),
+                tuple(center[axis_index] + half[axis_index] for axis_index in range(3)),
+            ]
+        )
+    return output
 
 
 def _project_film_fold_grid(
@@ -659,22 +775,45 @@ def _project_film_fold_grid(
 ) -> list[list[tuple[QPointF, float, float]]]:
     """Project the visualization-only peel mesh through the shared orbit camera."""
 
-    width = max(width_mm, 1.0e-9)
-    height = max(height_mm, 1.0e-9)
     surface: list[list[tuple[QPointF, float, float]]] = []
     for row in world_grid:
         output_row: list[tuple[QPointF, float, float]] = []
-        for (x, y, z), damage, fold_fraction in row:
-            on_plane = QPointF(
-                panel_rect.left() + x / width * panel_rect.width(),
-                panel_rect.bottom() - y / height * panel_rect.height(),
-            )
-            projected = plane_transform.map(on_plane) + _projected_z_offset(
-                z, z_reference_mm, elevation_degrees
+        for xyz, damage, fold_fraction in row:
+            projected = _project_film_world_point(
+                panel_rect,
+                xyz,
+                width_mm,
+                height_mm,
+                plane_transform,
+                z_reference_mm,
+                elevation_degrees,
             )
             output_row.append((projected, damage, fold_fraction))
         surface.append(output_row)
     return surface
+
+
+def _project_film_world_point(
+    panel_rect: QRectF,
+    xyz_mm: tuple[float, float, float],
+    width_mm: float,
+    height_mm: float,
+    plane_transform: QTransform,
+    z_reference_mm: float,
+    elevation_degrees: float,
+) -> QPointF:
+    """Project one film/tape material point through the shared orbit camera."""
+
+    width = max(width_mm, 1.0e-9)
+    height = max(height_mm, 1.0e-9)
+    x, y, z = xyz_mm
+    on_plane = QPointF(
+        panel_rect.left() + x / width * panel_rect.width(),
+        panel_rect.bottom() - y / height * panel_rect.height(),
+    )
+    return plane_transform.map(on_plane) + _projected_z_offset(
+        z, z_reference_mm, elevation_degrees
+    )
 
 
 def _film_surface_cells(
@@ -1563,6 +1702,7 @@ class PeelView(QWidget):
             pull_tape_length_mm=_float(get_value(tape, "length_mm", default=10.0), 10.0),
             front_damage_grid=front_damage_grid,
             follow_delta_xyz_mm=follow_delta_xyz,
+            mesh_subdivisions=2,
         )
         surface = _project_film_fold_grid(
             rect,
@@ -1572,6 +1712,25 @@ class PeelView(QWidget):
             plane_transform,
             self.z_reference_mm,
             self.camera_elevation_deg,
+        )
+        attachment_world = _pull_tape_attachment_world(
+            fold_world,
+            width_mm,
+            str(corner),
+            _float(get_value(tape, "width_mm", default=10.0), 10.0),
+            center_x_mm=visual_grip_xyz[0],
+        )
+        attachment_screen = tuple(
+            _project_film_world_point(
+                rect,
+                point,
+                width_mm,
+                height_mm,
+                plane_transform,
+                self.z_reference_mm,
+                self.camera_elevation_deg,
+            )
+            for point in attachment_world
         )
 
         # Paint a single connected sheet. Every quadrilateral shares vertices
@@ -1627,19 +1786,64 @@ class PeelView(QWidget):
             painter.drawPolyline(QPolygonF([*material_boundary, material_boundary[0]]))
         painter.restore()
 
-        anchor_row = -1 if "top" in str(corner) else 0
-        anchor_column = -1 if "right" in str(corner) else 0
-        material_anchor = surface[anchor_row][anchor_column][0]
-        # The small riser is the projected Z component. The full pull-tape
-        # ribbon and gripper head are rendered in screen space so their width
-        # remains legible without changing the physical trajectory geometry.
+        material_anchor = QPointF(
+            (attachment_screen[0].x() + attachment_screen[1].x()) * 0.5,
+            (attachment_screen[0].y() + attachment_screen[1].y()) * 0.5,
+        )
+        # The small riser marks the projected Z component.  The tape itself is
+        # a separate 3-D mesh; only the compact head glyph remains screen-sized.
         if math.hypot(depth_offset.x(), depth_offset.y()) > 0.5:
             riser_pen = QPen(QColor(176, 190, 205, 105), 1.0, Qt.PenStyle.DotLine)
             riser_pen.setCapStyle(Qt.PenCapStyle.RoundCap)
             painter.setPen(riser_pen)
             painter.drawLine(grip_plane, grip_lifted)
         if self.show_equipment:
-            self._draw_pull_tape_and_head(painter, material_anchor, grip_lifted)
+            tape_world = _pull_tape_world_grid(attachment_world, visual_grip_xyz)
+            tape_surface = [
+                [
+                    _project_film_world_point(
+                        rect,
+                        point,
+                        width_mm,
+                        height_mm,
+                        plane_transform,
+                        self.z_reference_mm,
+                        self.camera_elevation_deg,
+                    )
+                    for point in row
+                ]
+                for row in tape_world
+            ]
+            painter.save()
+            painter.setPen(Qt.PenStyle.NoPen)
+            for index in range(len(tape_surface) - 1):
+                fraction = index / max(len(tape_surface) - 2, 1)
+                fill = QColor(126, 195, 240, round(_lerp(88, 158, fraction)))
+                painter.setBrush(fill)
+                painter.drawPolygon(
+                    QPolygonF(
+                        [
+                            tape_surface[index][0],
+                            tape_surface[index + 1][0],
+                            tape_surface[index + 1][1],
+                            tape_surface[index][1],
+                        ]
+                    )
+                )
+            painter.setBrush(Qt.BrushStyle.NoBrush)
+            painter.setPen(QPen(QColor(163, 215, 248, 190), 0.9))
+            painter.drawPolyline(QPolygonF([row[0] for row in tape_surface]))
+            painter.drawPolyline(QPolygonF([row[1] for row in tape_surface]))
+            painter.setPen(QPen(QColor(218, 239, 252, 72), 0.55))
+            for row in tape_surface[2:-1:2]:
+                painter.drawLine(row[0], row[1])
+            painter.restore()
+            self._draw_pull_tape_and_head(
+                painter,
+                material_anchor,
+                grip_lifted,
+                render_ribbon=False,
+            )
         if self.show_force_vectors:
             self._draw_applied_force_vector(painter, material_anchor)
 
@@ -1717,6 +1921,8 @@ class PeelView(QWidget):
         painter: QPainter,
         material_anchor: QPointF,
         grip: QPointF,
+        *,
+        render_ribbon: bool = True,
     ) -> None:
         vector = grip - material_anchor
         distance = math.hypot(vector.x(), vector.y())
@@ -1731,20 +1937,28 @@ class PeelView(QWidget):
         )
         shown_width = max(4.0, min(9.0, 3.0 + tape_width_mm * 0.32))
         half = normal * (shown_width * 0.5)
+        start_plus = material_anchor + half
+        start_minus = material_anchor - half
         jaw_center = grip - unit * 7.0
         tape_end = jaw_center - unit * 2.0
-        ribbon = QPolygonF(
-            [material_anchor + half, tape_end + half, tape_end - half, material_anchor - half]
-        )
-        tape_gradient = QLinearGradient(material_anchor, tape_end)
-        tape_gradient.setColorAt(0.0, QColor(101, 181, 255, 82))
-        tape_gradient.setColorAt(0.6, QColor(151, 208, 255, 132))
-        tape_gradient.setColorAt(1.0, QColor(213, 235, 250, 176))
-        painter.setPen(QPen(QColor(120, 195, 255, 190), 0.9))
-        painter.setBrush(tape_gradient)
-        painter.drawPolygon(ribbon)
-        painter.setPen(QPen(QColor(224, 241, 255, 125), 0.75, Qt.PenStyle.DashLine))
-        painter.drawLine(material_anchor, tape_end)
+        end_plus = tape_end + half
+        end_minus = tape_end - half
+        ribbon = QPolygonF([start_plus, end_plus, end_minus, start_minus])
+        if render_ribbon:
+            tape_gradient = QLinearGradient(material_anchor, tape_end)
+            tape_gradient.setColorAt(0.0, QColor(101, 181, 255, 82))
+            tape_gradient.setColorAt(0.6, QColor(151, 208, 255, 132))
+            tape_gradient.setColorAt(1.0, QColor(213, 235, 250, 176))
+            painter.setPen(Qt.PenStyle.NoPen)
+            painter.setBrush(tape_gradient)
+            painter.drawPolygon(ribbon)
+            painter.setPen(QPen(QColor(120, 195, 255, 190), 0.9))
+            painter.setBrush(Qt.BrushStyle.NoBrush)
+            painter.drawPolygon(ribbon)
+            painter.setPen(
+                QPen(QColor(224, 241, 255, 125), 0.75, Qt.PenStyle.DashLine)
+            )
+            painter.drawLine(material_anchor, tape_end)
 
         angle = math.degrees(math.atan2(unit.y(), unit.x())) + 90.0
         painter.save()
@@ -2153,11 +2367,12 @@ class PeelView(QWidget):
         list[list[float]],
         tuple[float, float, float] | None,
     ]:
-        """Return current damage and the last physical front for full release.
+        """Return current damage, last front, and first-release head pose.
 
         A uniformly detached frame has no active contour.  The last preceding
-        non-uniform solver frame supplies the U-fold shape, and its grip pose is
-        returned so the whole detached mesh can follow the current head pose.
+        non-uniform solver frame records the physical front.  The first fully
+        detached frame supplies the follow reference, preventing a fast final
+        release from jumping by the whole last active-frame head displacement.
         This is display history only; solver state is never modified.
         """
 
@@ -2192,7 +2407,8 @@ class PeelView(QWidget):
             )
 
         shape = sequence(get_value(self.result, "mesh_shape", default=[]))
-        for frame_number in range(current_frame - 1, -1, -1):
+
+        def frame_grid(frame_number: int) -> list[list[float]]:
             frame = frames[frame_number]
             if hasattr(frame, "tolist"):
                 frame = frame.tolist()
@@ -2216,25 +2432,40 @@ class PeelView(QWidget):
                             ]
                             for row in range(rows_count)
                         ]
-            if not candidate or not _damage_contour_segments(candidate):
-                continue
+            return candidate
 
+        positions = sequence(get_value(self.result, "position_xyz_mm", default=[]))
+
+        def frame_pose(frame_number: int) -> tuple[float, float, float] | None:
             solver_index = (
                 frame_indices[frame_number]
                 if len(frame_indices) == len(frames)
-                else round(frame_number / max(len(frames) - 1, 1) * max(len(times) - 1, 0))
+                else round(
+                    frame_number
+                    / max(len(frames) - 1, 1)
+                    * max(len(times) - 1, 0)
+                )
             )
-            positions = sequence(get_value(self.result, "position_xyz_mm", default=[]))
-            if positions:
-                pose = positions[min(max(solver_index, 0), len(positions) - 1)]
-                if isinstance(pose, (list, tuple)) and len(pose) >= 3:
-                    return (
-                        current,
-                        candidate,
-                        (_float(pose[0]), _float(pose[1]), _float(pose[2])),
-                    )
-            return current, candidate, None
-        return current, current, None
+            if not positions:
+                return None
+            pose = positions[min(max(solver_index, 0), len(positions) - 1)]
+            if isinstance(pose, (list, tuple)) and len(pose) >= 3:
+                return (_float(pose[0]), _float(pose[1]), _float(pose[2]))
+            return None
+
+        detached_reference: tuple[float, float, float] | None = None
+        for frame_number in range(current_frame + 1):
+            candidate = frame_grid(frame_number)
+            if candidate and all(value >= 0.5 for row in candidate for value in row):
+                detached_reference = frame_pose(frame_number)
+                break
+
+        for frame_number in range(current_frame - 1, -1, -1):
+            candidate = frame_grid(frame_number)
+            if not candidate or not _damage_contour_segments(candidate):
+                continue
+            return current, candidate, detached_reference
+        return current, current, detached_reference
 
     @staticmethod
     def _series_value(values: list[float], progress: float, fallback: float = 0.0) -> float:

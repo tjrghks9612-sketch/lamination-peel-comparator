@@ -15,13 +15,14 @@ from lamination_sim.presets import measured_project
 from lamination_sim.simulation import simulate
 from lamination_sim.ui.visualization import (
     PeelView,
+    _camera_plane_transform,
     _damage_contour_segments,
+    _film_fold_world_grid,
     _film_peel_fields,
+    _project_film_fold_grid,
     _film_surface_boundary,
     _film_surface_cells,
-    _film_surface_grid,
     _interpolate_at_time,
-    _limited_pull_offset,
     _projected_z_offset,
     _time_bracket,
     _top_film_surface_grid,
@@ -72,55 +73,6 @@ def test_off_panel_grip_is_not_clamped_to_panel_edge(qt_app: QApplication) -> No
     assert point.y() >= panel_rect.top() - 28.0 - 1.0e-12
 
 
-def test_film_surface_uses_shared_vertices_without_tearing() -> None:
-    panel = QRectF(20.0, 30.0, 100.0, 200.0)
-    damage = [[0.0, 0.5, 1.0], [0.0, 0.5, 1.0]]
-
-    surface = _film_surface_grid(
-        panel,
-        damage,
-        damage,
-        QPointF(12.0, -8.0),
-        QPointF(6.0, -14.0),
-        0.0,
-    )
-    cells = _film_surface_cells(surface)
-
-    assert len(cells) == 2
-    first, second = cells
-    assert first[0][1] == second[0][0]
-    assert first[0][2] == second[0][3]
-
-
-def test_fully_detached_surface_remains_one_full_size_sheet() -> None:
-    panel = QRectF(20.0, 30.0, 100.0, 200.0)
-    pull = QPointF(12.0, -8.0)
-    depth = QPointF(6.0, -14.0)
-
-    surface = _film_surface_grid(
-        panel,
-        [[1.0, 1.0], [1.0, 1.0]],
-        [[1.0, 1.0], [1.0, 1.0]],
-        pull,
-        depth,
-        0.0,
-    )
-    boundary = _film_surface_boundary(surface)
-
-    assert max(point.x() for point in boundary) - min(point.x() for point in boundary) == pytest.approx(
-        panel.width()
-    )
-    assert max(point.y() for point in boundary) - min(point.y() for point in boundary) == pytest.approx(
-        panel.height()
-    )
-    assert min(point.x() for point in boundary) == pytest.approx(
-        panel.left() + pull.x() + depth.x()
-    )
-    assert min(point.y() for point in boundary) == pytest.approx(
-        panel.top() + pull.y() + depth.y()
-    )
-
-
 def test_visual_film_bridges_intact_islands_instead_of_drawing_holes() -> None:
     damage = [
         [1.0, 1.0, 1.0, 1.0, 1.0],
@@ -152,6 +104,94 @@ def test_visual_film_curves_up_from_front_toward_gripped_corner() -> None:
     assert lift[3][3] == pytest.approx(0.0)
 
 
+def test_180_degree_fold_is_continuous_at_front_then_reverses_direction() -> None:
+    damage = [[1.0] * 10 + [0.5] + [0.0] * 10 for _ in range(3)]
+    radius = 0.04 * math.hypot(100.0, 20.0)
+    arc_length = math.pi * radius
+    uncorrected_anchor = (50.0 + (50.0 - arc_length), 0.0, 2.0 * radius)
+
+    world = _film_fold_world_grid(
+        100.0,
+        20.0,
+        damage,
+        "bottom_left",
+        uncorrected_anchor,
+        0.0,
+    )
+    front = world[0][10][0]
+    rising = world[0][9][0]
+    tail = world[0][6][0]
+    anchor = world[0][0][0]
+
+    assert front == pytest.approx((50.0, 0.0, 0.0))
+    assert rising[0] < front[0]
+    assert 0.0 < rising[2] < 2.0 * radius
+    assert tail[0] > front[0]
+    assert tail[2] == pytest.approx(2.0 * radius)
+    assert anchor == pytest.approx(uncorrected_anchor)
+
+
+def test_diagonal_and_fully_detached_fold_remain_one_shared_mesh() -> None:
+    diagonal = [
+        [1.0, 1.0, 1.0, 0.0],
+        [1.0, 1.0, 0.0, 0.0],
+        [1.0, 0.0, 0.0, 0.0],
+        [0.0, 0.0, 0.0, 0.0],
+    ]
+    panel = QRectF(20.0, 30.0, 100.0, 200.0)
+    transform = _camera_plane_transform(panel, QRectF(0.0, 0.0, 400.0, 400.0), 38.0, 32.0)
+
+    for damage in (diagonal, [[1.0] * 4 for _ in range(4)]):
+        world = _film_fold_world_grid(
+            71.5,
+            149.6,
+            damage,
+            "bottom_left",
+            (84.0, 165.0, 28.0),
+            0.0,
+        )
+        surface = _project_film_fold_grid(
+            panel, world, 71.5, 149.6, transform, 56.0, 32.0
+        )
+        cells = _film_surface_cells(surface)
+
+        assert len(cells) == 9
+        assert len(_film_surface_boundary(surface)) == 12
+        assert cells[0][0][1] == cells[1][0][0]
+        assert cells[0][0][2] == cells[1][0][3]
+
+
+def test_fold_projects_as_3d_geometry_when_camera_rotates() -> None:
+    damage = [[1.0, 1.0, 0.0], [1.0, 1.0, 0.0], [1.0, 1.0, 0.0]]
+    world = _film_fold_world_grid(
+        60.0, 120.0, damage, "bottom_left", (72.0, 132.0, 24.0), 0.0
+    )
+    panel = QRectF(20.0, 30.0, 100.0, 200.0)
+    area = QRectF(0.0, 0.0, 400.0, 400.0)
+    quarter = _project_film_fold_grid(
+        panel,
+        world,
+        60.0,
+        120.0,
+        _camera_plane_transform(panel, area, 38.0, 32.0),
+        56.0,
+        32.0,
+    )
+    side = _project_film_fold_grid(
+        panel,
+        world,
+        60.0,
+        120.0,
+        _camera_plane_transform(panel, area, 90.0, 20.0),
+        56.0,
+        20.0,
+    )
+
+    assert world[0][0][0][2] > 0.0
+    assert quarter[0][0][0] != side[0][0][0]
+    assert quarter[0][1][0] != side[0][1][0]
+
+
 def test_z_height_responds_to_orbit_camera_elevation() -> None:
     low = _projected_z_offset(4.0, 56.0)
     high = _projected_z_offset(14.0, 56.0)
@@ -163,17 +203,6 @@ def test_z_height_responds_to_orbit_camera_elevation() -> None:
     assert high.y() < low.y()
     assert top.y() == pytest.approx(0.0, abs=1.0e-10)
     assert front.y() < high.y()
-
-
-def test_in_plane_film_motion_preserves_measured_diagonal_pull_direction() -> None:
-    anchor = QPointF(10.0, 90.0)
-    grip = QPointF(70.0, 20.0)
-
-    offset = _limited_pull_offset(anchor, grip)
-
-    assert offset.x() > 0.0
-    assert offset.y() < 0.0
-    assert math.hypot(offset.x(), offset.y()) <= 25.0 + 1.0e-12
 
 
 def test_damage_contour_spans_the_actual_full_height_boundary() -> None:

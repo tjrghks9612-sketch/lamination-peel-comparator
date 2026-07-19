@@ -55,6 +55,9 @@ def export_comparison_csv(bundle_or_comparison: Any, path: str | Path) -> Path:
         ("force_x", "force_x_n"),
         ("force_y", "force_y_n"),
         ("force_z", "force_z_n"),
+        ("top_interface_force", "top_interface_normal_force_n"),
+        ("top_reaction_x", "top_reaction_centroid_x_mm"),
+        ("top_reaction_y", "top_reaction_centroid_y_mm"),
         ("top_risk", "top_risk"),
         ("bottom_peel", "bottom_peel_ratio"),
         ("top_risk_area", "top_risk_area_mm2"),
@@ -268,6 +271,7 @@ def _report_metrics(result_a: Any, result_b: Any) -> list[tuple[str, str, str]]:
         ("상면 최종 손상 면적", ("final_top_damage_area_mm2",), " mm²"),
         ("상면 임계 초과 지속시간", ("top_risk_exceedance_duration_s",), " s"),
         ("최대 하중 모멘트", ("max_moment_resultant_n_mm",), " N·mm"),
+        ("최대 상면 PSA 정상반력", ("max_top_interface_normal_force_n",), " N"),
     )
     rows = []
     for label, names, unit in specs:

@@ -7,16 +7,69 @@
       "width_mm": 71.5,
       "height_mm": 149.6,
       "thickness_mm": 0.056,
-      "corner_radius_mm": 0.0
+      "corner_radius_mm": 0.0,
+      "trim_geometry": {
+        "pretrim_margin_mm": 1.5,
+        "cell_corner_radius_mm": 6.0,
+        "pad_height_mm": 3.0,
+        "island_width_mm": 22.0,
+        "island_height_mm": 6.0
+      }
+    },
+    "top_film": {
+      "pet_thickness_um": 75.0,
+      "psa_thickness_um": 75.0,
+      "adhesion_gf": 4.0
+    },
+    "bottom_film": {
+      "pet_thickness_um": 75.0,
+      "psa_thickness_um": 25.0,
+      "adhesion_gf": 1.5
+    },
+    "pull_tape": {
+      "start_corner": "bottom_left",
+      "width_mm": 10.0,
+      "length_mm": 10.0
     },
     "trajectory": [
-      {"x_mm": 0.0, "y_mm": 0.0, "z_mm": 4.0, "speed_mm_s": 0.0},
-      {"x_mm": 6.5, "y_mm": 7.5, "z_mm": 4.0, "speed_mm_s": 50.0},
-      {"x_mm": 13.0, "y_mm": 15.0, "z_mm": 4.0, "speed_mm_s": 30.0},
-      {"x_mm": 13.0, "y_mm": 25.0, "z_mm": 4.0, "speed_mm_s": 30.0},
-      {"x_mm": 13.0, "y_mm": 75.0, "z_mm": 15.0, "speed_mm_s": 200.0},
-      {"x_mm": 26.0, "y_mm": 250.0, "z_mm": 46.0, "speed_mm_s": 500.0}
-    ]
+      {
+        "x_mm": 0.0,
+        "y_mm": 0.0,
+        "z_mm": 4.0,
+        "speed_mm_s": 0.0
+      },
+      {
+        "x_mm": 6.5,
+        "y_mm": 7.5,
+        "z_mm": 4.0,
+        "speed_mm_s": 50.0
+      },
+      {
+        "x_mm": 13.0,
+        "y_mm": 15.0,
+        "z_mm": 4.0,
+        "speed_mm_s": 30.0
+      },
+      {
+        "x_mm": 13.0,
+        "y_mm": 25.0,
+        "z_mm": 4.0,
+        "speed_mm_s": 30.0
+      },
+      {
+        "x_mm": 13.0,
+        "y_mm": 75.0,
+        "z_mm": 15.0,
+        "speed_mm_s": 200.0
+      },
+      {
+        "x_mm": 26.0,
+        "y_mm": 250.0,
+        "z_mm": 46.0,
+        "speed_mm_s": 500.0
+      }
+    ],
+    "initial_approach": null
   },
   "condition_b": {
     "name": "Condition B",
@@ -25,17 +78,129 @@
       "width_mm": 71.5,
       "height_mm": 149.6,
       "thickness_mm": 0.056,
-      "corner_radius_mm": 0.0
+      "corner_radius_mm": 0.0,
+      "trim_geometry": {
+        "pretrim_margin_mm": 1.5,
+        "cell_corner_radius_mm": 6.0,
+        "pad_height_mm": 3.0,
+        "island_width_mm": 22.0,
+        "island_height_mm": 6.0
+      }
+    },
+    "top_film": {
+      "pet_thickness_um": 75.0,
+      "psa_thickness_um": 75.0,
+      "adhesion_gf": 4.0
+    },
+    "bottom_film": {
+      "pet_thickness_um": 75.0,
+      "psa_thickness_um": 25.0,
+      "adhesion_gf": 1.5
+    },
+    "pull_tape": {
+      "start_corner": "bottom_left",
+      "width_mm": 10.0,
+      "length_mm": 10.0
     },
     "trajectory": [
-      {"x_mm": 0.0, "y_mm": 0.0, "z_mm": 14.0, "speed_mm_s": 0.0},
-      {"x_mm": 6.5, "y_mm": 7.5, "z_mm": 14.0, "speed_mm_s": 5.0},
-      {"x_mm": 13.0, "y_mm": 15.0, "z_mm": 14.0, "speed_mm_s": 5.0},
-      {"x_mm": 13.0, "y_mm": 25.0, "z_mm": 14.0, "speed_mm_s": 20.0},
-      {"x_mm": 13.0, "y_mm": 75.0, "z_mm": 25.0, "speed_mm_s": 20.0},
-      {"x_mm": 13.0, "y_mm": 315.0, "z_mm": 56.0, "speed_mm_s": 500.0}
-    ]
+      {
+        "x_mm": 0.0,
+        "y_mm": 0.0,
+        "z_mm": 14.0,
+        "speed_mm_s": 0.0
+      },
+      {
+        "x_mm": 6.5,
+        "y_mm": 7.5,
+        "z_mm": 14.0,
+        "speed_mm_s": 5.0
+      },
+      {
+        "x_mm": 13.0,
+        "y_mm": 15.0,
+        "z_mm": 14.0,
+        "speed_mm_s": 5.0
+      },
+      {
+        "x_mm": 13.0,
+        "y_mm": 25.0,
+        "z_mm": 14.0,
+        "speed_mm_s": 20.0
+      },
+      {
+        "x_mm": 13.0,
+        "y_mm": 75.0,
+        "z_mm": 25.0,
+        "speed_mm_s": 20.0
+      },
+      {
+        "x_mm": 13.0,
+        "y_mm": 315.0,
+        "z_mm": 56.0,
+        "speed_mm_s": 500.0
+      }
+    ],
+    "initial_approach": null
   },
-  "assumptions": {},
-  "run_uncertainty": false
+  "assumptions": {
+    "calibration_version": "uncalibrated",
+    "test_width_mm": 25.0,
+    "test_angle_deg": 180.0,
+    "panel_young_modulus_gpa": 70.0,
+    "panel_poisson_ratio": 0.22,
+    "pet_young_modulus_gpa": 3.0,
+    "pet_poisson_ratio": 0.38,
+    "psa_modulus_mpa": 0.5,
+    "max_pull_force_n": 20.0,
+    "mixed_mode_shear_weight": 1.0,
+    "vertical_front_reach_factor": 0.25,
+    "cohesive_stiffness_floor_ratio": 0.01,
+    "torsion_coupling": 0.25,
+    "damage_convergence_tolerance": 0.001,
+    "damage_max_iterations": 100,
+    "bottom_completion_ratio": 0.98,
+    "speed_exponent": 0.0,
+    "reference_speed_mm_s": 5.0,
+    "quasi_static_speed_mm_s": 0.1,
+    "grip_scale": 1.0,
+    "mesh_size_mm": 2.0,
+    "fine_mesh_size_mm": 1.0,
+    "coarse_mesh_size_mm": 4.0,
+    "time_steps_normal": 101,
+    "time_steps_fine": 161,
+    "time_steps_coarse": 41,
+    "uncertainty_samples": 24,
+    "minimum_robust_samples": 20,
+    "random_seed": 20260716,
+    "tie_tolerance_percent": 2.0
+  },
+  "tension_sweep": {
+    "enabled": true,
+    "mode": "equal_preload",
+    "preload_levels": [
+      {
+        "label": "Low",
+        "value": 0.0
+      },
+      {
+        "label": "Mid",
+        "value": 0.5
+      },
+      {
+        "label": "High",
+        "value": 1.5
+      }
+    ],
+    "tape_stiffness_n_per_mm": 2.25,
+    "stiffness_levels": [
+      {
+        "label": "PET estimate (fixed)",
+        "value": 2.25
+      }
+    ],
+    "rest_length_reference": "condition_a",
+    "custom_rest_length_mm": null,
+    "nest_material_uncertainty": false
+  },
+  "run_uncertainty": true
 }

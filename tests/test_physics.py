@@ -114,6 +114,32 @@ def test_top_damage_reduces_local_foundation_and_converges() -> None:
     assert max(max(frame) for frame in result.top_risk_frames) > 0.0
 
 
+def test_top_interface_reaction_is_damage_softened_and_exportable_per_frame() -> None:
+    condition = default_condition()
+    condition.top_film.adhesion_gf = 0.002
+    result = simulate(
+        condition,
+        AssumptionSet(time_steps_coarse=21, damage_max_iterations=200),
+        "coarse",
+    )
+
+    assert len(result.top_interface_normal_force_n) == len(result.time_s)
+    assert len(result.top_interface_reaction_centroid_xy_mm) == len(result.time_s)
+    assert len(result.top_interface_reaction_frames_n) == len(result.frame_indices)
+    assert all(value >= 0.0 for value in result.top_interface_normal_force_n)
+    assert all(
+        value >= 0.0
+        for frame in result.top_interface_reaction_frames_n
+        for value in frame
+    )
+    for frame_index, frame in zip(
+        result.frame_indices, result.top_interface_reaction_frames_n
+    ):
+        assert sum(frame) == pytest.approx(
+            result.top_interface_normal_force_n[frame_index], rel=1.0e-10, abs=1.0e-12
+        )
+
+
 def test_thicker_panel_reduces_lift() -> None:
     thin = default_condition()
     thick = thin.model_copy(deep=True)

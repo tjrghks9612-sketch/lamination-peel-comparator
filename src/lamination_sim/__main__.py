@@ -35,7 +35,7 @@ def _self_test() -> int:
     if not all(math.isfinite(value) for value in values):
         return 2
     scenarios = result.tension_scenario_results
-    if len(scenarios) != 9:
+    if len(scenarios) != 3:
         return 3
     if any(item.winner not in {"tie", "inconclusive"} for item in scenarios):
         return 3
@@ -50,7 +50,7 @@ def _self_test() -> int:
         + result.tension_wins_b
         + result.tension_ties
         + result.tension_inconclusive
-        != 9
+        != 3
     ):
         return 3
     return 0

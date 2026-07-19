@@ -8,7 +8,12 @@ from typing import Literal
 import numpy as np
 from pydantic import BaseModel, ConfigDict, Field
 
-from .models import AssumptionSet, ProjectV1, TensionCase
+from .models import (
+    PREDICTED_PULL_TAPE_STIFFNESS_LABEL,
+    AssumptionSet,
+    ProjectV1,
+    TensionCase,
+)
 from .simulation import SimulationResult, p1_span_length_mm, simulate
 
 
@@ -277,54 +282,50 @@ def _resolved_tension_cases(project: ProjectV1) -> list[_ResolvedTensionCase]:
     config = project.tension_sweep
     span_a = p1_span_length_mm(project.condition_a)
     span_b = p1_span_length_mm(project.condition_b)
+    fixed_stiffness = float(config.tape_stiffness_n_per_mm)
     cases: list[_ResolvedTensionCase] = []
     for preload in config.preload_levels:
-        for stiffness in config.stiffness_levels:
-            rest_length: float | None = None
-            effective_a = preload.value
-            effective_b = preload.value
-            if config.mode == "shared_rest_length":
-                if config.rest_length_reference == "custom":
-                    rest_length = float(config.custom_rest_length_mm or 0.0)
-                elif config.rest_length_reference == "condition_b":
-                    rest_length = span_b
-                else:
-                    rest_length = span_a
-                effective_a = max(
-                    0.0,
-                    preload.value
-                    + stiffness.value * (span_a - rest_length),
-                )
-                effective_b = max(
-                    0.0,
-                    preload.value
-                    + stiffness.value * (span_b - rest_length),
-                )
-            cases.append(
-                _ResolvedTensionCase(
-                    index=len(cases),
-                    preload_label=preload.label,
-                    preload_n=preload.value,
-                    stiffness_label=stiffness.label,
-                    stiffness_n_per_mm=stiffness.value,
-                    case_a=TensionCase(
-                        initial_preload_n=effective_a,
-                        tape_stiffness_n_per_mm=stiffness.value,
-                    ),
-                    case_b=TensionCase(
-                        initial_preload_n=effective_b,
-                        tape_stiffness_n_per_mm=stiffness.value,
-                    ),
-                    shared_rest_length_mm=rest_length,
-                )
+        rest_length: float | None = None
+        effective_a = preload.value
+        effective_b = preload.value
+        if config.mode == "shared_rest_length":
+            if config.rest_length_reference == "custom":
+                rest_length = float(config.custom_rest_length_mm or 0.0)
+            elif config.rest_length_reference == "condition_b":
+                rest_length = span_b
+            else:
+                rest_length = span_a
+            effective_a = max(
+                0.0,
+                preload.value + fixed_stiffness * (span_a - rest_length),
             )
+            effective_b = max(
+                0.0,
+                preload.value + fixed_stiffness * (span_b - rest_length),
+            )
+        cases.append(
+            _ResolvedTensionCase(
+                index=len(cases),
+                preload_label=preload.label,
+                preload_n=preload.value,
+                stiffness_label=PREDICTED_PULL_TAPE_STIFFNESS_LABEL,
+                stiffness_n_per_mm=fixed_stiffness,
+                case_a=TensionCase(
+                    initial_preload_n=effective_a,
+                    tape_stiffness_n_per_mm=fixed_stiffness,
+                ),
+                case_b=TensionCase(
+                    initial_preload_n=effective_b,
+                    tape_stiffness_n_per_mm=fixed_stiffness,
+                ),
+                shared_rest_length_mm=rest_length,
+            )
+        )
     return cases
 
 
 def _selected_tension_index(project: ProjectV1) -> int:
-    rows = len(project.tension_sweep.preload_levels)
-    columns = len(project.tension_sweep.stiffness_levels)
-    return (rows // 2) * columns + columns // 2
+    return len(project.tension_sweep.preload_levels) // 2
 
 
 def _max_abs_force(result: SimulationResult) -> list[float]:

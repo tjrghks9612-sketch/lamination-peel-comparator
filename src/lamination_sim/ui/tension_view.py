@@ -70,8 +70,8 @@ class TensionSweepView(QWidget):
         root.addLayout(body)
 
         charts = QHBoxLayout()
-        self.risk_chart = LineChart("9개 조합 Peak Rtop", "sweep_value")
-        self.peel_chart = LineChart("9개 조합 하면 박리율", "sweep_value")
+        self.risk_chart = LineChart("초기장력 조합 Peak Rtop", "sweep_value")
+        self.peel_chart = LineChart("초기장력 조합 하면 박리율", "sweep_value")
         charts.addWidget(self.risk_chart)
         charts.addWidget(self.peel_chart)
         root.addLayout(charts)

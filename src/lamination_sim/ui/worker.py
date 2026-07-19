@@ -23,8 +23,8 @@ class SimulationWorker(QObject):
     def run(self) -> None:
         sweep = get_value(self.project, "tension_sweep", default={})
         preload_count = max(1, len(sequence(get_value(sweep, "preload_levels", default=[]))))
-        stiffness_count = max(1, len(sequence(get_value(sweep, "stiffness_levels", default=[]))))
-        combinations = preload_count * stiffness_count
+        # Tape stiffness is a fixed PET estimate; only preload is swept.
+        combinations = preload_count
         material_enabled = bool(get_value(self.project, "run_uncertainty", default=False))
         nested = bool(get_value(sweep, "nest_material_uncertainty", default=False))
         material_count = int(

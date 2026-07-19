@@ -6,6 +6,7 @@ from typing import Any
 
 from PySide6.QtCore import QTimer, Qt, Signal
 from PySide6.QtWidgets import (
+    QButtonGroup,
     QFrame,
     QGridLayout,
     QHBoxLayout,
@@ -21,7 +22,7 @@ from PySide6.QtWidgets import (
 from .core_bridge import RunBundle, get_value, result_series, scalar_metric
 from .theme import COLORS
 from .tension_view import TensionSweepView
-from .visualization import LineChart, PeelView
+from .visualization import CAMERA_PRESETS, LineChart, PeelView
 
 
 CLASSIFICATION_LABELS = {
@@ -189,16 +190,108 @@ class ResultsView(QWidget):
             layout.setColumnStretch(index, 1)
         return layout
 
-    def _build_views(self) -> QHBoxLayout:
-        layout = QHBoxLayout()
-        layout.setSpacing(9)
+    def _build_views(self) -> QVBoxLayout:
+        layout = QVBoxLayout()
+        layout.setSpacing(7)
+
+        toolbar = QFrame()
+        toolbar.setProperty("card", True)
+        toolbar_layout = QHBoxLayout(toolbar)
+        toolbar_layout.setContentsMargins(10, 6, 10, 6)
+        toolbar_layout.setSpacing(6)
+        title = QLabel("3D 시점")
+        title.setStyleSheet("font-weight:700;")
+        toolbar_layout.addWidget(title)
+        self.camera_button_group = QButtonGroup(self)
+        self.camera_button_group.setExclusive(True)
+        self.camera_buttons: dict[str, QPushButton] = {}
+        for name, label in (
+            ("top", "상면"),
+            ("quarter", "쿼터"),
+            ("front", "정면"),
+            ("side", "측면"),
+        ):
+            button = QPushButton(label)
+            button.setCheckable(True)
+            button.setFixedHeight(28)
+            button.setMinimumWidth(54)
+            button.clicked.connect(
+                lambda checked, preset=name: checked and self._set_camera_preset(preset)
+            )
+            self.camera_button_group.addButton(button)
+            self.camera_buttons[name] = button
+            toolbar_layout.addWidget(button)
+        self.camera_buttons["quarter"].setChecked(True)
+        self.camera_angle_label = QLabel("yaw -135° · elev 38°")
+        self.camera_angle_label.setProperty("muted", True)
+        toolbar_layout.addWidget(self.camera_angle_label)
+        self.layer_buttons: dict[str, QPushButton] = {}
+        for key, label in (
+            ("top_film", "상면 필름"),
+            ("bottom_film", "하면 필름"),
+            ("equipment", "헤드/테이프"),
+            ("force_vectors", "힘 벡터"),
+        ):
+            button = QPushButton(label)
+            button.setCheckable(True)
+            button.setChecked(True)
+            button.setFixedHeight(28)
+            button.clicked.connect(self._update_visual_layers)
+            self.layer_buttons[key] = button
+            toolbar_layout.addWidget(button)
+        toolbar_layout.addStretch(1)
+        hint = QLabel("좌클릭 드래그로 회전 · 더블클릭으로 쿼터뷰")
+        hint.setProperty("muted", True)
+        toolbar_layout.addWidget(hint)
+        layout.addWidget(toolbar)
+
+        views = QHBoxLayout()
+        views.setSpacing(9)
         self.view_a = PeelView("A", COLORS["a"])
         self.view_b = PeelView("B", COLORS["b"])
         self.view_a.progress_requested.connect(self._set_progress_from_view)
         self.view_b.progress_requested.connect(self._set_progress_from_view)
-        layout.addWidget(self.view_a, 1)
-        layout.addWidget(self.view_b, 1)
+        self.view_a.camera_changed.connect(self._sync_camera_from_view)
+        self.view_b.camera_changed.connect(self._sync_camera_from_view)
+        views.addWidget(self.view_a, 1)
+        views.addWidget(self.view_b, 1)
+        layout.addLayout(views, 1)
         return layout
+
+    def _update_visual_layers(self) -> None:
+        visibility = {
+            key: button.isChecked() for key, button in self.layer_buttons.items()
+        }
+        self.view_a.set_layer_visibility(**visibility)
+        self.view_b.set_layer_visibility(**visibility)
+
+    def _set_camera_preset(self, name: str) -> None:
+        self.view_a.set_camera_preset(name)
+        self.view_b.set_camera_preset(name)
+        yaw, elevation = CAMERA_PRESETS[name]
+        self._update_camera_controls(yaw, elevation)
+
+    def _sync_camera_from_view(self, yaw: float, elevation: float) -> None:
+        source = self.sender()
+        target = self.view_b if source is self.view_a else self.view_a
+        target.set_camera_angles(yaw, elevation)
+        self._update_camera_controls(yaw, elevation)
+
+    def _update_camera_controls(self, yaw: float, elevation: float) -> None:
+        matching = next(
+            (
+                name
+                for name, (preset_yaw, preset_elevation) in CAMERA_PRESETS.items()
+                if abs(yaw - preset_yaw) < 0.05
+                and abs(elevation - preset_elevation) < 0.05
+            ),
+            None,
+        )
+        self.camera_button_group.setExclusive(False)
+        for name, button in self.camera_buttons.items():
+            button.setChecked(name == matching)
+        self.camera_button_group.setExclusive(True)
+        self.camera_angle_label.setText(f"yaw {yaw:.0f}° · elev {elevation:.0f}°")
 
     def _set_progress_from_view(self, progress: float) -> None:
         self.timeline.setValue(round(max(0.0, min(1.0, progress)) * 1000))
@@ -256,8 +349,12 @@ class ResultsView(QWidget):
         mechanics_layout.setSpacing(8)
         self.lift_chart = LineChart("패널 최대 들림", "panel_lift", " mm")
         self.force_chart = LineChart("풀테이프 반력", "force", " N")
+        self.top_interface_force_chart = LineChart(
+            "상면 PSA 정상반력", "top_interface_force", " N"
+        )
         mechanics_layout.addWidget(self.lift_chart)
         mechanics_layout.addWidget(self.force_chart)
+        mechanics_layout.addWidget(self.top_interface_force_chart)
 
         moment_tab = QWidget()
         moment_layout = QHBoxLayout(moment_tab)
@@ -340,6 +437,7 @@ class ResultsView(QWidget):
             self.damage_chart,
             self.lift_chart,
             self.force_chart,
+            self.top_interface_force_chart,
             self.twist_chart,
             self.moment_chart,
             self.speed_chart,

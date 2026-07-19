@@ -174,6 +174,10 @@ SERIES_ALIASES: dict[str, tuple[str, ...]] = {
     "twist": ("panel_twist_mm", "twist_history_mm", "panel_twist", "twist"),
     "top_risk_area": ("top_risk_area_mm2", "risk_area_history_mm2"),
     "top_damage": ("top_damage_area_mm2", "damage_area_history_mm2"),
+    "top_interface_force": (
+        "top_interface_normal_force_n",
+        "top_psa_normal_force_n",
+    ),
     "moment": (
         "moment_resultant_n_mm",
         "moment_history_n_mm",
@@ -190,6 +194,8 @@ VECTOR_SERIES: dict[str, tuple[tuple[str, ...], int]] = {
     "force_x": (("force_xyz_n", "reaction_force_xyz_n"), 0),
     "force_y": (("force_xyz_n", "reaction_force_xyz_n"), 1),
     "force_z": (("force_xyz_n", "reaction_force_xyz_n"), 2),
+    "top_reaction_x": (("top_interface_reaction_centroid_xy_mm",), 0),
+    "top_reaction_y": (("top_interface_reaction_centroid_xy_mm",), 1),
 }
 
 

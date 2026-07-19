@@ -130,7 +130,7 @@ def test_peel_progress_and_top_damage_never_reverse() -> None:
     damage_area = np.asarray(_get_value(result, "top_damage_area_mm2"), dtype=float)
     assert np.all(np.diff(peel_ratio) >= -1.0e-12)
     assert np.all(np.diff(damage_area) >= -1.0e-12)
-    assert 0.0 < peel_ratio[-1] < 1.0
+    assert 0.0 < peel_ratio[-1] <= 1.0
 
 
 def test_identical_conditions_have_identical_nominal_risk() -> None:

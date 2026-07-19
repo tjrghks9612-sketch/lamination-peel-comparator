@@ -18,9 +18,33 @@ StartCorner = Literal["bottom_left", "bottom_right", "top_left", "top_right"]
 TensionMode = Literal["equal_preload", "shared_rest_length"]
 RestLengthReference = Literal["condition_a", "condition_b", "custom"]
 
+# A fixed reduced-order estimate for the PET pull tape used by common film
+# peeling fixtures.  It is intentionally not part of the sensitivity sweep;
+# only the unknown initial preload remains a scenario variable.
+#
+# Estimate: E ~= 4.55 GPa, 50 um PET backing, 10 mm tape width and a 1 m
+# effective compliant length for the tape + free film path:
+#   k = E * (width * thickness) / effective_length ~= 2.25 N/mm.
+PREDICTED_PULL_TAPE_STIFFNESS_N_PER_MM = 2.25
+PREDICTED_PULL_TAPE_STIFFNESS_LABEL = "PET estimate (fixed)"
+
 
 class _StrictModel(BaseModel):
     model_config = ConfigDict(extra="forbid", validate_assignment=True)
+
+
+class TrimGeometryConfig(_StrictModel):
+    """Future trim features inside the current rectangular laminate sheet.
+
+    These dimensions are display/process references only.  The cohesive mesh
+    continues to cover the full sharp-cornered pre-trim panel rectangle.
+    """
+
+    pretrim_margin_mm: float = Field(default=1.5, gt=0.0, le=50.0)
+    cell_corner_radius_mm: float = Field(default=6.0, ge=0.0, le=100.0)
+    pad_height_mm: float = Field(default=3.0, gt=0.0, le=100.0)
+    island_width_mm: float = Field(default=22.0, gt=0.0, le=100.0)
+    island_height_mm: float = Field(default=6.0, gt=0.0, le=50.0)
 
 
 class PanelConfig(_StrictModel):
@@ -29,11 +53,27 @@ class PanelConfig(_StrictModel):
     height_mm: float = Field(default=149.6, gt=0.0, le=500.0)
     thickness_mm: float = Field(default=0.7, gt=0.0, le=20.0)
     corner_radius_mm: float = Field(default=0.0, ge=0.0)
+    trim_geometry: TrimGeometryConfig = Field(default_factory=TrimGeometryConfig)
 
     @model_validator(mode="after")
     def _radius_fits_panel(self) -> "PanelConfig":
         if self.corner_radius_mm > min(self.width_mm, self.height_mm) / 2.0:
             raise ValueError("corner_radius_mm must not exceed half the short side")
+        trim = self.trim_geometry
+        cell_width = self.width_mm - 2.0 * trim.pretrim_margin_mm
+        cell_height = (
+            self.height_mm
+            - 2.0 * trim.pretrim_margin_mm
+            - trim.pad_height_mm
+        )
+        if cell_width <= 0.0 or cell_height <= 0.0:
+            raise ValueError(
+                "trim margin and pad height must leave a positive finished-cell area"
+            )
+        if trim.cell_corner_radius_mm > min(cell_width, cell_height) / 2.0:
+            raise ValueError(
+                "cell_corner_radius_mm must fit inside the finished-cell area"
+            )
         return self
 
 
@@ -207,9 +247,10 @@ def _default_preload_levels() -> list[SweepLevel]:
 
 def _default_stiffness_levels() -> list[SweepLevel]:
     return [
-        SweepLevel(label="Low", value=0.05),
-        SweepLevel(label="Mid", value=0.20),
-        SweepLevel(label="High", value=1.00),
+        SweepLevel(
+            label=PREDICTED_PULL_TAPE_STIFFNESS_LABEL,
+            value=PREDICTED_PULL_TAPE_STIFFNESS_N_PER_MM,
+        )
     ]
 
 
@@ -217,28 +258,47 @@ class TensionCase(_StrictModel):
     """Resolved tension law for one condition and one sensitivity cell."""
 
     initial_preload_n: float = Field(default=0.5, ge=0.0, le=10000.0)
-    tape_stiffness_n_per_mm: float = Field(default=0.20, ge=0.0, le=10000.0)
+    tape_stiffness_n_per_mm: float = Field(
+        default=PREDICTED_PULL_TAPE_STIFFNESS_N_PER_MM,
+        ge=0.0,
+        le=10000.0,
+    )
 
 
 class TensionSweepConfig(_StrictModel):
     enabled: bool = True
     mode: TensionMode = "equal_preload"
     preload_levels: list[SweepLevel] = Field(default_factory=_default_preload_levels)
-    stiffness_levels: list[SweepLevel] = Field(default_factory=_default_stiffness_levels)
+    tape_stiffness_n_per_mm: float = Field(
+        default=PREDICTED_PULL_TAPE_STIFFNESS_N_PER_MM,
+        gt=0.0,
+        le=10000.0,
+        description=(
+            "Fixed equivalent pull-tape stiffness estimated from common PET "
+            "film data; not swept with initial preload."
+        ),
+    )
+    # Kept only so projects written by v0.5.4 can still be opened.  The
+    # comparison engine intentionally ignores this legacy list and uses the
+    # fixed tape_stiffness_n_per_mm above.
+    stiffness_levels: list[SweepLevel] = Field(
+        default_factory=lambda: [
+            SweepLevel(
+                label=PREDICTED_PULL_TAPE_STIFFNESS_LABEL,
+                value=PREDICTED_PULL_TAPE_STIFFNESS_N_PER_MM,
+            )
+        ],
+        description="Deprecated compatibility field; no longer a sweep axis.",
+    )
     rest_length_reference: RestLengthReference = "condition_a"
     custom_rest_length_mm: float | None = Field(default=None, gt=0.0, le=10000.0)
     nest_material_uncertainty: bool = False
 
     @model_validator(mode="after")
     def _valid_sweep(self) -> "TensionSweepConfig":
-        if not self.preload_levels or not self.stiffness_levels:
-            raise ValueError("tension sweep requires at least one preload and stiffness level")
-        if len(self.preload_levels) * len(self.stiffness_levels) > 100:
-            raise ValueError("tension sweep cannot exceed 100 combinations")
-        for name, levels in (
-            ("preload", self.preload_levels),
-            ("stiffness", self.stiffness_levels),
-        ):
+        if not self.preload_levels:
+            raise ValueError("tension sweep requires at least one preload level")
+        for name, levels in (("preload", self.preload_levels),):
             labels = [level.label.casefold() for level in levels]
             if len(labels) != len(set(labels)):
                 raise ValueError(f"{name} level labels must be unique")

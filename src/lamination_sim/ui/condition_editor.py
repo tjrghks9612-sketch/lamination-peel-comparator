@@ -73,6 +73,8 @@ class ConditionEditor(QWidget):
         self.accent = accent
         self._loading = False
         self._initial_approach: list[dict[str, float]] | None = None
+        self._island_width_mm = 22.0
+        self._island_height_mm = 6.0
 
         root = QVBoxLayout(self)
         root.setContentsMargins(0, 0, 0, 0)
@@ -116,6 +118,9 @@ class ConditionEditor(QWidget):
         self.panel_width = _spin(71.5, 20, 300, 2, "mm")
         self.panel_height = _spin(149.6, 20, 400, 2, "mm")
         self.panel_thickness = _spin(0.7, 0.05, 20, 3, "mm")
+        self.pretrim_margin = _spin(1.5, 0.1, 20, 2, "mm")
+        self.cell_corner_radius = _spin(6.0, 0.0, 50, 2, "mm")
+        self.pad_height = _spin(3.0, 0.1, 30, 2, "mm")
         layout.addWidget(QLabel("크기 프리셋"), 0, 0)
         layout.addWidget(self.panel_preset, 0, 1, 1, 3)
         layout.addWidget(QLabel("폭"), 1, 0)
@@ -124,6 +129,15 @@ class ConditionEditor(QWidget):
         layout.addWidget(self.panel_height, 1, 3)
         layout.addWidget(QLabel("두께"), 2, 0)
         layout.addWidget(self.panel_thickness, 2, 1)
+        layout.addWidget(QLabel("트림 전 여유"), 3, 0)
+        layout.addWidget(self.pretrim_margin, 3, 1)
+        layout.addWidget(QLabel("완성 셀 코너 R"), 3, 2)
+        layout.addWidget(self.cell_corner_radius, 3, 3)
+        layout.addWidget(QLabel("상단 패드 높이"), 4, 0)
+        layout.addWidget(self.pad_height, 4, 1)
+        orientation = QLabel("패드 상단 · 아일랜드/홀 하단 (180°)")
+        orientation.setProperty("dim", True)
+        layout.addWidget(orientation, 4, 2, 1, 2)
         return box
 
     def _build_film_group(self) -> QGroupBox:
@@ -287,6 +301,9 @@ class ConditionEditor(QWidget):
             self.panel_width,
             self.panel_height,
             self.panel_thickness,
+            self.pretrim_margin,
+            self.cell_corner_radius,
+            self.pad_height,
             self.top_pet,
             self.top_psa,
             self.top_adhesion,
@@ -347,6 +364,13 @@ class ConditionEditor(QWidget):
                 "height_mm": self.panel_height.value(),
                 "thickness_mm": self.panel_thickness.value(),
                 "corner_radius_mm": 0.0,
+                "trim_geometry": {
+                    "pretrim_margin_mm": self.pretrim_margin.value(),
+                    "cell_corner_radius_mm": self.cell_corner_radius.value(),
+                    "pad_height_mm": self.pad_height.value(),
+                    "island_width_mm": self._island_width_mm,
+                    "island_height_mm": self._island_height_mm,
+                },
             },
             "top_film": {
                 "pet_thickness_um": self.top_pet.value(),
@@ -395,6 +419,22 @@ class ConditionEditor(QWidget):
             self.panel_width.setValue(float(get_value(panel, "width_mm", default=71.5)))
             self.panel_height.setValue(float(get_value(panel, "height_mm", default=149.6)))
             self.panel_thickness.setValue(float(get_value(panel, "thickness_mm", default=0.7)))
+            trim = get_value(panel, "trim_geometry", default={})
+            self.pretrim_margin.setValue(
+                float(get_value(trim, "pretrim_margin_mm", default=1.5))
+            )
+            self.cell_corner_radius.setValue(
+                float(get_value(trim, "cell_corner_radius_mm", default=6.0))
+            )
+            self.pad_height.setValue(
+                float(get_value(trim, "pad_height_mm", default=3.0))
+            )
+            self._island_width_mm = float(
+                get_value(trim, "island_width_mm", default=22.0)
+            )
+            self._island_height_mm = float(
+                get_value(trim, "island_height_mm", default=6.0)
+            )
 
             for prefix in ("top", "bottom"):
                 film = get_value(condition, f"{prefix}_film", default={})

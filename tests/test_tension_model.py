@@ -7,7 +7,12 @@ from lamination_sim.comparison import (
     _classify_tension_sweep,
     compare,
 )
-from lamination_sim.models import AssumptionSet, SweepLevel, TensionCase
+from lamination_sim.models import (
+    PREDICTED_PULL_TAPE_STIFFNESS_N_PER_MM,
+    AssumptionSet,
+    SweepLevel,
+    TensionCase,
+)
 from lamination_sim.presets import default_condition, measured_project
 from lamination_sim.simulation import simulate, tension_from_span
 
@@ -65,18 +70,35 @@ def test_equal_preload_pairs_identical_p1_tension_for_a_and_b() -> None:
 
     result = compare(project)
 
-    assert len(result.tension_scenario_results) == 9
+    assert len(result.tension_scenario_results) == 3
     assert (
         result.tension_wins_a
         + result.tension_wins_b
         + result.tension_ties
         + result.tension_inconclusive
-        == 9
+        == 3
     )
     for scenario in result.tension_scenario_results:
         assert scenario.p1_tension_a_n == pytest.approx(scenario.initial_preload_n)
         assert scenario.p1_tension_b_n == pytest.approx(scenario.initial_preload_n)
         assert scenario.p1_tension_a_n == pytest.approx(scenario.p1_tension_b_n)
+
+
+def test_fixed_pet_stiffness_is_not_a_sweep_axis() -> None:
+    project = measured_project()
+    project.tension_sweep.stiffness_levels = [
+        SweepLevel(label="legacy-low", value=0.01),
+        SweepLevel(label="legacy-high", value=50.0),
+    ]
+
+    result = compare(project)
+
+    assert len(result.tension_scenario_results) == 3
+    assert all(
+        scenario.tape_stiffness_n_per_mm
+        == pytest.approx(PREDICTED_PULL_TAPE_STIFFNESS_N_PER_MM)
+        for scenario in result.tension_scenario_results
+    )
 
 
 def test_shared_rest_length_reflects_p1_geometry_difference() -> None:
@@ -85,7 +107,7 @@ def test_shared_rest_length_reflects_p1_geometry_difference() -> None:
     project.tension_sweep.rest_length_reference = "condition_a"
 
     result = compare(project)
-    middle = result.tension_scenario_results[4]
+    middle = result.tension_scenario_results[1]
 
     assert middle.p1_span_length_b_mm > middle.p1_span_length_a_mm
     assert middle.p1_tension_b_n > middle.p1_tension_a_n

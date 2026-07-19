@@ -30,6 +30,8 @@ def test_csv_and_html_exports_are_nonempty(tmp_path):
     assert "force_x_n_a" in csv_text
     assert "force_y_n_a" in csv_text
     assert "force_z_n_a" in csv_text
+    assert "top_interface_normal_force_n_a" in csv_text
+    assert "top_reaction_centroid_x_mm_a" in csv_text
     assert "top_risk_a" in csv_text
     assert "top_damage_area_mm2_a" in csv_text
     assert "moment_n_mm_a" in csv_text

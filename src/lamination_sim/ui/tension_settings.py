@@ -23,6 +23,10 @@ from PySide6.QtWidgets import (
 )
 
 from .core_bridge import get_value, sequence
+from ..models import (
+    PREDICTED_PULL_TAPE_STIFFNESS_LABEL,
+    PREDICTED_PULL_TAPE_STIFFNESS_N_PER_MM,
+)
 
 
 class TensionSettingsDialog(QDialog):
@@ -69,7 +73,13 @@ class TensionSettingsDialog(QDialog):
         )
         self.stiffnesses = self._level_group(
             "등가 인장강성 수준 (N/mm)",
-            [("Low", 0.05), ("Mid", 0.20), ("High", 1.00)],
+            [
+                (
+                    PREDICTED_PULL_TAPE_STIFFNESS_LABEL,
+                    PREDICTED_PULL_TAPE_STIFFNESS_N_PER_MM,
+                )
+            ],
+            editable=False,
         )
         tables.addWidget(self.preloads[0])
         tables.addWidget(self.stiffnesses[0])
@@ -89,7 +99,11 @@ class TensionSettingsDialog(QDialog):
         self._load(config)
 
     def _level_group(
-        self, title: str, defaults: list[tuple[str, float]]
+        self,
+        title: str,
+        defaults: list[tuple[str, float]],
+        *,
+        editable: bool = True,
     ) -> tuple[QGroupBox, QTableWidget]:
         group = QGroupBox(title)
         layout = QVBoxLayout(group)
@@ -98,17 +112,27 @@ class TensionSettingsDialog(QDialog):
         table.horizontalHeader().setStretchLastSection(True)
         for label, value in defaults:
             self._append_level(table, label, value)
-        controls = QHBoxLayout()
-        add = QPushButton("추가")
-        remove = QPushButton("선택 삭제")
-        add.clicked.connect(lambda: self._append_level(table, "New", 0.0))
-        remove.clicked.connect(lambda: self._remove_selected(table))
-        table.itemChanged.connect(self._update_estimate)
-        controls.addWidget(add)
-        controls.addWidget(remove)
-        controls.addStretch(1)
+        table.setEnabled(editable)
         layout.addWidget(table)
-        layout.addLayout(controls)
+        if editable:
+            controls = QHBoxLayout()
+            add = QPushButton("추가")
+            remove = QPushButton("선택 삭제")
+            add.clicked.connect(lambda: self._append_level(table, "New", 0.0))
+            remove.clicked.connect(lambda: self._remove_selected(table))
+            table.itemChanged.connect(self._update_estimate)
+            controls.addWidget(add)
+            controls.addWidget(remove)
+            controls.addStretch(1)
+            layout.addLayout(controls)
+        else:
+            note = QLabel(
+                "Literature-based PET estimate is fixed in the model; "
+                "only initial preload is swept."
+            )
+            note.setWordWrap(True)
+            note.setProperty("muted", True)
+            layout.addWidget(note)
         return group, table
 
     @staticmethod
@@ -137,10 +161,7 @@ class TensionSettingsDialog(QDialog):
         self.nested.setChecked(
             bool(get_value(config, "nest_material_uncertainty", default=False))
         )
-        for table, name in (
-            (self.preloads[1], "preload_levels"),
-            (self.stiffnesses[1], "stiffness_levels"),
-        ):
+        for table, name in ((self.preloads[1], "preload_levels"),):
             levels = sequence(get_value(config, name, default=[]))
             if levels:
                 table.setRowCount(0)
@@ -174,7 +195,14 @@ class TensionSettingsDialog(QDialog):
             "enabled": True,
             "mode": str(self.mode.currentData()),
             "preload_levels": self._levels(self.preloads[1]),
-            "stiffness_levels": self._levels(self.stiffnesses[1]),
+            "tape_stiffness_n_per_mm": PREDICTED_PULL_TAPE_STIFFNESS_N_PER_MM,
+            # Compatibility for v0.5.4 project readers; this is not a sweep axis.
+            "stiffness_levels": [
+                {
+                    "label": PREDICTED_PULL_TAPE_STIFFNESS_LABEL,
+                    "value": PREDICTED_PULL_TAPE_STIFFNESS_N_PER_MM,
+                }
+            ],
             "rest_length_reference": reference,
             "custom_rest_length_mm": (
                 self.custom_rest.value() if reference == "custom" else None
@@ -189,7 +217,7 @@ class TensionSettingsDialog(QDialog):
         self._update_estimate()
 
     def _update_estimate(self, *_args) -> None:
-        combinations = self.preloads[1].rowCount() * self.stiffnesses[1].rowCount()
+        combinations = self.preloads[1].rowCount()
         if self._run_material and self.nested.isChecked():
             total = combinations * self._material_samples * 2
             expression = (

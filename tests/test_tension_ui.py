@@ -21,8 +21,8 @@ def qt_app() -> QApplication:
 def _scenario(index: int, preload: float, stiffness: float) -> dict:
     return {
         "index": index,
-        "preload_label": ("Low", "Mid", "High")[index // 3],
-        "stiffness_label": ("Low", "Mid", "High")[index % 3],
+        "preload_label": ("Low", "Mid", "High")[index],
+        "stiffness_label": "PET estimate (fixed)",
         "initial_preload_n": preload,
         "tape_stiffness_n_per_mm": stiffness,
         "p1_tension_a_n": preload,
@@ -44,15 +44,14 @@ def _scenario(index: int, preload: float, stiffness: float) -> dict:
     }
 
 
-def test_tension_tab_builds_three_by_three_unit_labeled_heatmap(
+def test_tension_tab_builds_three_by_one_fixed_stiffness_heatmap(
     qt_app: QApplication,
 ) -> None:
     preloads = [0.0, 0.5, 1.5]
-    stiffnesses = [0.05, 0.2, 1.0]
+    stiffnesses = [2.25]
     scenarios = [
-        _scenario(row * 3 + column, preload, stiffness)
+        _scenario(row, preload, stiffnesses[0])
         for row, preload in enumerate(preloads)
-        for column, stiffness in enumerate(stiffnesses)
     ]
     view = TensionSweepView()
     view.set_comparison(
@@ -68,9 +67,9 @@ def test_tension_tab_builds_three_by_three_unit_labeled_heatmap(
     )
 
     assert view.heatmap.rowCount() == 3
-    assert view.heatmap.columnCount() == 3
+    assert view.heatmap.columnCount() == 1
     assert "1.5 N" in view.heatmap.verticalHeaderItem(2).text()
-    assert "1 N/mm" in view.heatmap.horizontalHeaderItem(2).text()
+    assert "2.25 N/mm" in view.heatmap.horizontalHeaderItem(0).text()
     assert "Peak Rtop" in view.detail.text()
 
 
@@ -82,9 +81,10 @@ def test_advanced_settings_show_nested_432_run_estimate(qt_app: QApplication) ->
     )
     dialog.nested.setChecked(True)
 
-    assert "432" in dialog.estimate.text()
+    assert "144" in dialog.estimate.text()
     assert len(dialog.payload()["preload_levels"]) == 3
-    assert len(dialog.payload()["stiffness_levels"]) == 3
+    assert len(dialog.payload()["stiffness_levels"]) == 1
+    assert dialog.payload()["tape_stiffness_n_per_mm"] == pytest.approx(2.25)
 
 
 def test_results_workspace_contains_tension_sensitivity_tab(qt_app: QApplication) -> None:

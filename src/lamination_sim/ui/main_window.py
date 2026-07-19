@@ -338,8 +338,9 @@ class MainWindow(QMainWindow):
 
     def _update_run_estimate(self, *_args) -> None:
         preloads = sequence(get_value(self._tension_sweep, "preload_levels", default=[]))
-        stiffnesses = sequence(get_value(self._tension_sweep, "stiffness_levels", default=[]))
-        combinations = max(1, len(preloads)) * max(1, len(stiffnesses))
+        # Tape stiffness is a fixed PET estimate. Only initial preload remains
+        # a sensitivity axis, so legacy stiffness_levels are not multiplied in.
+        combinations = max(1, len(preloads))
         samples = int(get_value(self._assumptions, "uncertainty_samples", default=24))
         nested = bool(
             get_value(self._tension_sweep, "nest_material_uncertainty", default=False)

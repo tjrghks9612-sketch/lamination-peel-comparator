@@ -25,7 +25,7 @@ from .trajectory import interpolate_trajectory
 
 
 Resolution = Literal["coarse", "normal", "fine"]
-MODEL_VERSION = "cohesive-v5-tension-sweep"
+MODEL_VERSION = "cohesive-v6-visual-loads"
 FloatArray = NDArray[np.float64]
 
 
@@ -62,6 +62,8 @@ class SimulationResult(BaseModel):
     top_risk_area_mm2: list[float]
     top_damage_area_mm2: list[float]
     top_min_foundation_retention: list[float]
+    top_interface_normal_force_n: list[float]
+    top_interface_reaction_centroid_xy_mm: list[list[float]]
     panel_max_lift_mm: list[float]
     panel_twist_mm: list[float]
     bottom_damage_iterations: list[int]
@@ -80,6 +82,7 @@ class SimulationResult(BaseModel):
     max_panel_twist_mm: float
     max_moment_resultant_n_mm: float
     max_tension_n: float
+    max_top_interface_normal_force_n: float
 
     mesh_shape: tuple[int, int]
     mesh_x_mm: list[float]
@@ -89,6 +92,7 @@ class SimulationResult(BaseModel):
     bottom_damage_frames: list[list[float]]
     top_damage_frames: list[list[float]]
     top_risk_frames: list[list[float]]
+    top_interface_reaction_frames_n: list[list[float]]
     front_segments_mm: list[list[float]]
     warnings: list[str] = Field(default_factory=list)
 
@@ -688,6 +692,7 @@ def simulate(
     bottom_damage_frames: list[list[float]] = []
     top_damage_frames: list[list[float]] = []
     top_risk_frames: list[list[float]] = []
+    top_interface_reaction_frames: list[list[float]] = []
 
     force_xyz = np.zeros((steps, 3), dtype=float)
     force_resultant = np.zeros(steps, dtype=float)
@@ -702,6 +707,8 @@ def simulate(
     risk_area = np.zeros(steps, dtype=float)
     damage_area = np.zeros(steps, dtype=float)
     min_foundation_retention = np.ones(steps, dtype=float)
+    top_interface_force = np.zeros(steps, dtype=float)
+    top_reaction_centroid = np.zeros((steps, 2), dtype=float)
     max_lift = np.zeros(steps, dtype=float)
     twist = np.zeros(steps, dtype=float)
     fronts = np.zeros((steps, 4), dtype=float)
@@ -965,6 +972,23 @@ def simulate(
             + (1.0 - assumptions.cohesive_stiffness_floor_ratio)
             * (1.0 - top_damage)
         )
+        # Normal reaction transmitted through the damage-softened top PSA.
+        # Winkler springs do not resolve in-plane interface shear, therefore
+        # this is stored explicitly as a normal-only field and must not be
+        # presented as the full 3-D top-interface traction.
+        top_reaction_n = (
+            top_foundation * top_retention * np.maximum(displacement, 0.0) * nodal_areas
+        )
+        top_interface_force[index] = float(top_reaction_n.sum())
+        if top_interface_force[index] > 1.0e-15:
+            top_reaction_centroid[index, 0] = float(
+                np.dot(top_reaction_n, mesh_x) / top_interface_force[index]
+            )
+            top_reaction_centroid[index, 1] = float(
+                np.dot(top_reaction_n, mesh_y) / top_interface_force[index]
+            )
+        else:
+            top_reaction_centroid[index] = front_center
         min_foundation_retention[index] = float(top_retention.min(initial=1.0))
         max_lift[index] = float(np.maximum(displacement, 0.0).max(initial=0.0))
         bl, br, tl, tr = _corner_values(displacement, nx, ny)
@@ -975,6 +999,7 @@ def simulate(
             bottom_damage_frames.append(bottom_damage.tolist())
             top_damage_frames.append(top_damage.tolist())
             top_risk_frames.append(local_risk.tolist())
+            top_interface_reaction_frames.append(top_reaction_n.tolist())
 
     peak_index = int(np.argmax(peak_risk))
     exceedance_duration = float(
@@ -1021,6 +1046,8 @@ def simulate(
         top_risk_area_mm2=risk_area.tolist(),
         top_damage_area_mm2=damage_area.tolist(),
         top_min_foundation_retention=min_foundation_retention.tolist(),
+        top_interface_normal_force_n=top_interface_force.tolist(),
+        top_interface_reaction_centroid_xy_mm=top_reaction_centroid.tolist(),
         panel_max_lift_mm=max_lift.tolist(),
         panel_twist_mm=twist.tolist(),
         bottom_damage_iterations=bottom_iterations.tolist(),
@@ -1038,6 +1065,7 @@ def simulate(
         max_panel_twist_mm=float(twist.max(initial=0.0)),
         max_moment_resultant_n_mm=float(moment_resultant.max(initial=0.0)),
         max_tension_n=float(tension_history.max(initial=0.0)),
+        max_top_interface_normal_force_n=float(top_interface_force.max(initial=0.0)),
         mesh_shape=(ny, nx),
         mesh_x_mm=mesh_x.tolist(),
         mesh_y_mm=mesh_y.tolist(),
@@ -1046,6 +1074,7 @@ def simulate(
         bottom_damage_frames=bottom_damage_frames,
         top_damage_frames=top_damage_frames,
         top_risk_frames=top_risk_frames,
+        top_interface_reaction_frames_n=top_interface_reaction_frames,
         front_segments_mm=fronts.tolist(),
         warnings=warnings,
     )

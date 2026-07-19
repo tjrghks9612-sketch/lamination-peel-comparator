@@ -821,9 +821,6 @@ def simulate(
             panel_diagonal,
             assumptions,
         )
-        work_increment_current = _actuator_work_n_mm(
-            mechanics.force_xyz, gripper_increment
-        )
         work_increment_trapezoid = _actuator_work_n_mm(
             mechanics.force_xyz,
             gripper_increment,
@@ -832,10 +829,11 @@ def simulate(
         peel_work[index] = (
             (peel_work[index - 1] if index else 0.0) + work_increment_trapezoid
         )
-        # Damage iteration retains the established current-step release budget;
-        # the reported actuator work uses the endpoint-average trapezoid above.
-        work_remaining = work_increment_current
-        damage_budget = work_increment_current
+        # The same endpoint-average work budget drives both the reported peel
+        # work and the irreversible damage iteration; no current-force-only
+        # energy is available to be reused within a step.
+        work_remaining = work_increment_trapezoid
+        damage_budget = work_increment_trapezoid
         converged = True
         for iteration in range(1, max_iterations + 1):
             bottom_iterations[index] = iteration

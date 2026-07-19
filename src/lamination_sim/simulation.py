@@ -49,6 +49,8 @@ class SimulationResult(BaseModel):
     peel_angle_deg: list[float]
     force_xyz_n: list[list[float]]
     force_resultant_n: list[float]
+    peel_work_n_mm: list[float]
+    damage_energy_used_n_mm: list[float]
     moment_xyz_n_mm: list[list[float]]
     moment_resultant_n_mm: list[float]
     pull_force_activation: list[float]
@@ -83,6 +85,9 @@ class SimulationResult(BaseModel):
     max_moment_resultant_n_mm: float
     max_tension_n: float
     max_top_interface_normal_force_n: float
+    total_peel_work_n_mm: float
+    total_damage_energy_used_n_mm: float
+    pull_force_saturation_fraction: float
 
     mesh_shape: tuple[int, int]
     mesh_x_mm: list[float]
@@ -308,10 +313,36 @@ def _film_reach_mask(
     return np.hypot(local_x, local_y) <= reach + 1.0e-12
 
 
-def _actuator_work_n_mm(force_xyz_n: FloatArray, displacement_xyz_mm: FloatArray) -> float:
+def _actuator_work_n_mm(
+    force_xyz_n: FloatArray,
+    displacement_xyz_mm: FloatArray,
+    previous_force_xyz_n: FloatArray | None = None,
+) -> float:
     """Positive incremental actuator work; transverse/reverse motion adds none."""
 
-    return max(float(np.dot(force_xyz_n, displacement_xyz_mm)), 0.0)
+    if previous_force_xyz_n is None:
+        effective_force = force_xyz_n
+    else:
+        effective_force = 0.5 * (previous_force_xyz_n + force_xyz_n)
+    return max(float(np.dot(effective_force, displacement_xyz_mm)), 0.0)
+
+
+def _longest_saturated_time_fraction(
+    time_s: FloatArray, saturated: NDArray[np.bool_]
+) -> float:
+    if len(time_s) < 2 or len(saturated) != len(time_s):
+        return 0.0
+    total = float(time_s[-1] - time_s[0])
+    if total <= 0.0:
+        return 0.0
+    longest = current = 0.0
+    for index in range(1, len(time_s)):
+        if saturated[index - 1] and saturated[index]:
+            current += float(time_s[index] - time_s[index - 1])
+            longest = max(longest, current)
+        else:
+            current = 0.0
+    return longest / total
 
 
 def tension_from_span(
@@ -696,6 +727,9 @@ def simulate(
 
     force_xyz = np.zeros((steps, 3), dtype=float)
     force_resultant = np.zeros(steps, dtype=float)
+    peel_work = np.zeros(steps, dtype=float)
+    damage_energy_used = np.zeros(steps, dtype=float)
+    force_saturated = np.zeros(steps, dtype=bool)
     moment_xyz = np.zeros((steps, 3), dtype=float)
     moment_resultant = np.zeros(steps, dtype=float)
     force_activation = np.zeros(steps, dtype=float)
@@ -787,9 +821,21 @@ def simulate(
             panel_diagonal,
             assumptions,
         )
-        work_remaining = _actuator_work_n_mm(
+        work_increment_current = _actuator_work_n_mm(
             mechanics.force_xyz, gripper_increment
         )
+        work_increment_trapezoid = _actuator_work_n_mm(
+            mechanics.force_xyz,
+            gripper_increment,
+            force_xyz[index - 1] if index else None,
+        )
+        peel_work[index] = (
+            (peel_work[index - 1] if index else 0.0) + work_increment_trapezoid
+        )
+        # Damage iteration retains the established current-step release budget;
+        # the reported actuator work uses the endpoint-average trapezoid above.
+        work_remaining = work_increment_current
+        damage_budget = work_increment_current
         converged = True
         for iteration in range(1, max_iterations + 1):
             bottom_iterations[index] = iteration
@@ -849,6 +895,10 @@ def simulate(
                 work_remaining > 1.0e-15
                 and np.any(mechanics.drive_ratio >= 1.0)
             )
+        damage_energy_used[index] = (
+            (damage_energy_used[index - 1] if index else 0.0)
+            + max(damage_budget - work_remaining, 0.0)
+        )
         # Treat a residual smaller than the declared damage tolerance as the
         # fully failed cohesive state.  This avoids reporting 99.975% solely
         # because the last node retained a sub-tolerance numerical sliver.
@@ -894,6 +944,9 @@ def simulate(
         force_activation[index] = available_force / assumptions.max_pull_force_n
         force_xyz[index] = force
         force_resultant[index] = float(np.linalg.norm(force))
+        force_saturated[index] = (
+            available_force >= assumptions.max_pull_force_n * (1.0 - 1.0e-12)
+        )
         peel_angles[index] = mechanics.peel_angle_deg
         bottom_ratio[index] = float(
             np.clip(np.dot(bottom_damage, nodal_areas) / panel_area, 0.0, 1.0)
@@ -1005,6 +1058,7 @@ def simulate(
     exceedance_duration = float(
         np.trapezoid((peak_risk >= 1.0).astype(float), time_s)
     )
+    saturation_fraction = _longest_saturated_time_fraction(time_s, force_saturated)
     warnings = [
         "이 결과는 보정 전 상대 비교용 축약 모델이며 실제 불량률 또는 안전 판정이 아닙니다.",
         "하면 박리는 노드별 에너지·일·연결성 기준, 상면은 손상 연성 Winkler 기초로 근사합니다.",
@@ -1015,6 +1069,11 @@ def simulate(
         warnings.append("일부 시간 단계에서 하면 손상 전파가 설정된 최대 반복 횟수에 도달했습니다.")
     if not bool(np.all(top_converged)):
         warnings.append("일부 시간 단계에서 상면 손상-강성 반복이 설정된 최대 횟수 안에 수렴하지 않았습니다.")
+    if saturation_fraction >= 0.10:
+        warnings.append(
+            f"장력이 max_pull_force_n={assumptions.max_pull_force_n:g} N에 "
+            f"전체 시간의 {saturation_fraction * 100:.1f}% 동안 연속 포화되었습니다."
+        )
 
     return SimulationResult(
         model_version=MODEL_VERSION,
@@ -1033,6 +1092,8 @@ def simulate(
         peel_angle_deg=peel_angles.tolist(),
         force_xyz_n=force_xyz.tolist(),
         force_resultant_n=force_resultant.tolist(),
+        peel_work_n_mm=peel_work.tolist(),
+        damage_energy_used_n_mm=damage_energy_used.tolist(),
         moment_xyz_n_mm=moment_xyz.tolist(),
         moment_resultant_n_mm=moment_resultant.tolist(),
         pull_force_activation=force_activation.tolist(),
@@ -1066,6 +1127,9 @@ def simulate(
         max_moment_resultant_n_mm=float(moment_resultant.max(initial=0.0)),
         max_tension_n=float(tension_history.max(initial=0.0)),
         max_top_interface_normal_force_n=float(top_interface_force.max(initial=0.0)),
+        total_peel_work_n_mm=float(peel_work[-1]),
+        total_damage_energy_used_n_mm=float(damage_energy_used[-1]),
+        pull_force_saturation_fraction=float(saturation_fraction),
         mesh_shape=(ny, nx),
         mesh_x_mm=mesh_x.tolist(),
         mesh_y_mm=mesh_y.tolist(),

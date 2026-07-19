@@ -405,17 +405,11 @@ def _classify_tension_sweep(
     elif a_rate >= 0.80 and b_rate <= 0.10:
         winner = "a"
         classification = "robust_a"
-        verdict = (
-            f"조건 A는 {count}개 장력 가정 중 {wins_a}개에서 우세했습니다. "
-            "알 수 없는 초기장력과 강성 범위에서도 A가 강건하게 유리합니다."
-        )
+        verdict = "고정 강성 2.25 N/mm에서 시험한 초기장력 조건 모두 우세: 조건 A."
     elif b_rate >= 0.80 and a_rate <= 0.10:
         winner = "b"
         classification = "robust_b"
-        verdict = (
-            f"조건 B는 {count}개 장력 가정 중 {wins_b}개에서 우세했습니다. "
-            "알 수 없는 초기장력과 강성 범위에서도 B가 강건하게 유리합니다."
-        )
+        verdict = "고정 강성 2.25 N/mm에서 시험한 초기장력 조건 모두 우세: 조건 B."
     elif a_rate >= 0.60:
         winner = "a"
         classification = "weak_a"
@@ -792,7 +786,7 @@ def compare(project: ProjectV1) -> ComparisonResult:
         overall_classification = "inconclusive"
         overall_verdict = (
             "장력 조합에서는 한쪽이 우세하지만 재료 불확실성 표본 수가 부족해 "
-            "강건한 결론을 보류합니다."
+            "장력 조건 간 우열이 엇갈려 결론을 보류합니다."
         )
 
     return ComparisonResult(

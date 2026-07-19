@@ -28,6 +28,10 @@ RestLengthReference = Literal["condition_a", "condition_b", "custom"]
 PREDICTED_PULL_TAPE_STIFFNESS_N_PER_MM = 2.25
 PREDICTED_PULL_TAPE_STIFFNESS_LABEL = "PET estimate (fixed)"
 
+PANEL_THICKNESS_MM = 0.056
+PULL_TAPE_STIFFNESS_N_PER_MM = 2.25
+INITIAL_TENSION_CONDITIONS_N = (0.0, 0.5, 1.5)
+
 
 class _StrictModel(BaseModel):
     model_config = ConfigDict(extra="forbid", validate_assignment=True)
@@ -51,7 +55,7 @@ class PanelConfig(_StrictModel):
     preset: PanelPreset = "pro"
     width_mm: float = Field(default=71.5, gt=0.0, le=500.0)
     height_mm: float = Field(default=149.6, gt=0.0, le=500.0)
-    thickness_mm: float = Field(default=0.7, gt=0.0, le=20.0)
+    thickness_mm: float = Field(default=PANEL_THICKNESS_MM, gt=0.0, le=20.0)
     corner_radius_mm: float = Field(default=0.0, ge=0.0)
     trim_geometry: TrimGeometryConfig = Field(default_factory=TrimGeometryConfig)
 

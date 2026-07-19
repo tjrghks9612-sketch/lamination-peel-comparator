@@ -100,7 +100,7 @@ class TensionSweepView(QWidget):
             get_value(comparison, "tension_classification", default="inconclusive")
         )
         verdict = str(get_value(comparison, "tension_verdict", default=""))
-        self.verdict.setText(f"최종 강건성: {classification} — {verdict}")
+        self.verdict.setText(f"장력 조건 판정: {classification} — {verdict}")
         self._populate_heatmap()
         self._populate_charts()
 

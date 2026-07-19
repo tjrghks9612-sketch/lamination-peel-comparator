@@ -386,8 +386,8 @@ def _render_html(
     a_json = html.escape(json.dumps(condition_a, ensure_ascii=False, indent=2))
     b_json = html.escape(json.dumps(condition_b, ensure_ascii=False, indent=2))
     classification_labels = {
-        "robust_a": "A가 강건하게 유리",
-        "robust_b": "B가 강건하게 유리",
+        "robust_a": "A · 고정 강성의 초기장력 3조건 모두 우세",
+        "robust_b": "B · 고정 강성의 초기장력 3조건 모두 우세",
         "weak_a": "A가 약하게 우세",
         "weak_b": "B가 약하게 우세",
         "tie": "동률",

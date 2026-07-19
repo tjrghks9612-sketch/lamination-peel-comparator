@@ -30,6 +30,13 @@ def test_actuator_work_uses_force_direction_not_scalar_path_length() -> None:
     assert _actuator_work_n_mm(force, np.asarray([-0.6, -0.8, 0.0])) == pytest.approx(0.0)
 
 
+def test_actuator_work_uses_previous_and_current_force_average() -> None:
+    previous = np.asarray([1.0, 0.0, 0.0])
+    current = np.asarray([3.0, 0.0, 0.0])
+    increment = np.asarray([2.0, 0.0, 0.0])
+    assert _actuator_work_n_mm(current, increment, previous) == pytest.approx(4.0)
+
+
 def test_film_payout_reach_is_isotropic_and_vertical_independent() -> None:
     local_x = np.asarray([8.0, 0.0, 6.0, 9.0])
     local_y = np.asarray([0.0, 8.0, 6.0, 0.0])
@@ -209,6 +216,32 @@ def test_mesh_refinement_converges_from_four_to_two_to_one_mm() -> None:
     assert fine.max_panel_lift_mm == pytest.approx(
         normal.max_panel_lift_mm, rel=0.15
     )
+
+
+def test_time_work_converges_at_51_101_201_steps() -> None:
+    condition = default_condition()
+    works = []
+    for steps in (51, 101, 201):
+        result = simulate(
+            condition,
+            AssumptionSet(time_steps_normal=steps),
+            "normal",
+        )
+        works.append(result.total_peel_work_n_mm)
+        assert result.total_damage_energy_used_n_mm >= 0.0
+    assert abs(works[2] - works[1]) < abs(works[1] - works[0])
+    assert abs(works[2] - works[1]) / max(works[2], 1.0e-12) < 0.20
+
+
+def test_long_force_cap_saturation_adds_warning() -> None:
+    result = simulate(
+        default_condition(),
+        AssumptionSet(max_pull_force_n=0.05),
+        "normal",
+        TensionCase(initial_preload_n=1.5, tape_stiffness_n_per_mm=2.25),
+    )
+    assert result.pull_force_saturation_fraction >= 0.10
+    assert any("max_pull_force_n" in item for item in result.warnings)
 
 
 def test_xy_path_order_changes_damage_front_and_mechanics() -> None:

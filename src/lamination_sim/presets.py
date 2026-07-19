@@ -7,6 +7,7 @@ from copy import deepcopy
 from .models import (
     Condition,
     FilmConfig,
+    PANEL_THICKNESS_MM,
     PanelConfig,
     ProjectV1,
     PullTapeConfig,
@@ -19,14 +20,14 @@ PANEL_PRESETS: dict[str, dict[str, float | str]] = {
         "preset": "pro",
         "width_mm": 71.5,
         "height_mm": 149.6,
-        "thickness_mm": 0.7,
+        "thickness_mm": PANEL_THICKNESS_MM,
         "corner_radius_mm": 0.0,
     },
     "pro_max": {
         "preset": "pro_max",
         "width_mm": 77.6,
         "height_mm": 163.0,
-        "thickness_mm": 0.7,
+        "thickness_mm": PANEL_THICKNESS_MM,
         "corner_radius_mm": 0.0,
     },
 }

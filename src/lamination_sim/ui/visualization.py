@@ -446,52 +446,167 @@ def _film_peel_fields(
     return grid, lift_grid
 
 
-def _film_surface_grid(
-    panel_rect: QRectF,
+def _film_fold_world_grid(
+    width_mm: float,
+    height_mm: float,
     damage_grid: list[list[float]],
-    lift_grid: list[list[float]],
-    pull_offset: QPointF,
-    depth_offset: QPointF,
+    corner: str,
+    grip_xyz_mm: tuple[float, float, float],
     fallback_damage: float,
-    plane_transform: QTransform | None = None,
-) -> list[list[tuple[QPointF, float, float]]]:
-    """Build one continuous projected film surface from shared vertices.
+) -> list[list[tuple[tuple[float, float, float], float, float]]]:
+    """Build a visualization-only 180-degree peel shape in panel coordinates.
 
-    Interface damage controls how far a material vertex lifts toward the grip;
-    it never creates or removes film material.  Adjacent cells reference the
-    same projected vertex, so the sheet cannot open gaps or tear on screen.
+    ``damage_grid`` is read-only solver output.  Its damage=0.5 contour is the
+    physical display front: the film meets the panel continuously there, rolls
+    through a semicircle, then runs back almost parallel to the panel.  The
+    distal tail is smoothly brought to the displayed grip position.  None of
+    these display coordinates participate in cohesive damage or force work.
     """
 
-    grid = damage_grid
+    grid = [list(row) for row in damage_grid if row]
     if not grid:
         damage = max(0.0, min(1.0, fallback_damage))
         grid = [[damage, damage], [damage, damage]]
     elif len(grid) == 1:
         grid = [list(grid[0]), list(grid[0])]
-    if len(grid[0]) == 1:
+    columns = min((len(row) for row in grid), default=0)
+    if columns == 1:
         grid = [[row[0], row[0]] for row in grid]
-
+        columns = 2
+    elif columns > 1:
+        grid = [row[:columns] for row in grid]
     rows = len(grid)
-    columns = len(grid[0])
-    total_offset = pull_offset + depth_offset
-    surface: list[list[tuple[QPointF, float, float]]] = []
+
+    width = max(float(width_mm), 1.0e-9)
+    height = max(float(height_mm), 1.0e-9)
+    contour = _damage_contour_segments(grid)
+    all_detached = all(_float(value) >= 0.5 for row in grid for value in row)
+    opposite = (
+        width if "right" not in corner else 0.0,
+        height if "top" not in corner else 0.0,
+    )
+    # Once the last bonded node releases there is no current threshold contour.
+    # Its limiting position is the opposite corner, which keeps the final frame
+    # a single folded sheet instead of snapping back to a rigid translation.
+    front_segments_mm = [
+        (
+            (start[0] * width, start[1] * height),
+            (end[0] * width, end[1] * height),
+        )
+        for start, end in contour
+    ]
+    if not front_segments_mm and all_detached:
+        front_segments_mm = [(opposite, opposite)]
+
+    start_corner = (
+        width if "right" in corner else 0.0,
+        height if "top" in corner else 0.0,
+    )
+    fallback_direction = (
+        start_corner[0] - opposite[0],
+        start_corner[1] - opposite[1],
+    )
+    fallback_length = max(math.hypot(*fallback_direction), 1.0e-9)
+    fallback_unit = (
+        fallback_direction[0] / fallback_length,
+        fallback_direction[1] / fallback_length,
+    )
+    fold_radius = max(2.5, min(7.0, 0.04 * math.hypot(width, height)))
+    arc_length = math.pi * fold_radius
+
+    def nearest_front(x: float, y: float) -> tuple[float, float, float, float, float]:
+        best = (opposite[0], opposite[1], fallback_unit[0], fallback_unit[1], float("inf"))
+        for first, second in front_segments_mm:
+            vx, vy = second[0] - first[0], second[1] - first[1]
+            length_squared = vx * vx + vy * vy
+            projection = (
+                0.0
+                if length_squared <= 1.0e-18
+                else max(0.0, min(1.0, ((x - first[0]) * vx + (y - first[1]) * vy) / length_squared))
+            )
+            fx, fy = first[0] + projection * vx, first[1] + projection * vy
+            dx, dy = x - fx, y - fy
+            distance = math.hypot(dx, dy)
+            if distance < best[4]:
+                if distance <= 1.0e-9:
+                    ux, uy = fallback_unit
+                else:
+                    ux, uy = dx / distance, dy / distance
+                best = (fx, fy, ux, uy, distance)
+        return best
+
+    def folded_point(x: float, y: float) -> tuple[tuple[float, float, float], float]:
+        fx, fy, ux, uy, distance = nearest_front(x, y)
+        if distance <= arc_length:
+            angle = distance / fold_radius
+            along = fold_radius * math.sin(angle)
+            return (
+                (fx + ux * along, fy + uy * along, fold_radius * (1.0 - math.cos(angle))),
+                distance,
+            )
+        tail = distance - arc_length
+        return ((fx - ux * tail, fy - uy * tail, 2.0 * fold_radius), distance)
+
+    anchor_point, anchor_distance = folded_point(*start_corner)
+    grip_x, grip_y, grip_z = grip_xyz_mm
+    correction = (
+        grip_x - anchor_point[0],
+        grip_y - anchor_point[1],
+        max(0.0, grip_z) - anchor_point[2],
+    )
+    correction_start = min(0.72 * arc_length, 0.72 * anchor_distance)
+    correction_span = max(anchor_distance - correction_start, fold_radius)
+
+    world: list[list[tuple[tuple[float, float, float], float, float]]] = []
     for row, values in enumerate(grid):
-        surface_row: list[tuple[QPointF, float, float]] = []
+        output_row: list[tuple[tuple[float, float, float], float, float]] = []
+        y = row / (rows - 1) * height
         for column, value in enumerate(values):
+            x = column / (columns - 1) * width
             damage = max(0.0, min(1.0, _float(value)))
-            fraction = (
-                max(0.0, min(1.0, _float(lift_grid[row][column])))
-                if row < len(lift_grid) and column < len(lift_grid[row])
-                else _smooth_lift_fraction(damage)
+            if damage < 0.5 or not front_segments_mm:
+                output_row.append(((x, y, 0.0), damage, 0.0))
+                continue
+            point, distance = folded_point(x, y)
+            weight = max(0.0, min(1.0, (distance - correction_start) / correction_span))
+            weight = _smooth_lift_fraction(weight)
+            point = (
+                point[0] + correction[0] * weight,
+                point[1] + correction[1] * weight,
+                max(0.0, point[2] + correction[2] * weight),
             )
-            base = QPointF(
-                panel_rect.left() + column / (columns - 1) * panel_rect.width(),
-                panel_rect.bottom() - row / (rows - 1) * panel_rect.height(),
+            fold_fraction = max(0.0, min(1.0, distance / max(arc_length, 1.0e-9)))
+            output_row.append((point, damage, fold_fraction))
+        world.append(output_row)
+    return world
+
+
+def _project_film_fold_grid(
+    panel_rect: QRectF,
+    world_grid: list[list[tuple[tuple[float, float, float], float, float]]],
+    width_mm: float,
+    height_mm: float,
+    plane_transform: QTransform,
+    z_reference_mm: float,
+    elevation_degrees: float,
+) -> list[list[tuple[QPointF, float, float]]]:
+    """Project the visualization-only peel mesh through the shared orbit camera."""
+
+    width = max(width_mm, 1.0e-9)
+    height = max(height_mm, 1.0e-9)
+    surface: list[list[tuple[QPointF, float, float]]] = []
+    for row in world_grid:
+        output_row: list[tuple[QPointF, float, float]] = []
+        for (x, y, z), damage, fold_fraction in row:
+            on_plane = QPointF(
+                panel_rect.left() + x / width * panel_rect.width(),
+                panel_rect.bottom() - y / height * panel_rect.height(),
             )
-            if plane_transform is not None:
-                base = plane_transform.map(base)
-            surface_row.append((base + total_offset * fraction, damage, fraction))
-        surface.append(surface_row)
+            projected = plane_transform.map(on_plane) + _projected_z_offset(
+                z, z_reference_mm, elevation_degrees
+            )
+            output_row.append((projected, damage, fold_fraction))
+        surface.append(output_row)
     return surface
 
 
@@ -654,21 +769,6 @@ def _projected_z_offset(
     elevation = math.radians(max(0.0, min(90.0, elevation_degrees)))
     depth = maximum_pixels * fraction * math.cos(elevation)
     return QPointF(0.0, -depth)
-
-
-def _limited_pull_offset(
-    anchor: QPointF,
-    grip_on_panel_plane: QPointF,
-    maximum_pixels: float = 25.0,
-) -> QPointF:
-    """Preserve the measured in-plane pull direction with bounded distortion."""
-
-    vector = grip_on_panel_plane - anchor
-    length = math.hypot(vector.x(), vector.y())
-    if length <= 1.0e-12:
-        return QPointF(0.0, 0.0)
-    shown = min(maximum_pixels, 0.12 * length)
-    return QPointF(vector.x() / length * shown, vector.y() / length * shown)
 
 
 def _damage_contour_segments(
@@ -1336,33 +1436,46 @@ class PeelView(QWidget):
         p1, p2 = self._result_front_line(rect, width_mm, height_mm, peel, str(corner))
         p1, p2 = plane_transform.map(p1), plane_transform.map(p2)
         current_xyz = self._result_position()
-        grip_plane = self._map_extended_xy(
+        grip_base = self._map_extended_xy_base(
             current_xyz[0], current_xyz[1], rect, width_mm, height_mm
         )
+        grip_plane = plane_transform.map(grip_base)
         depth_offset = _projected_z_offset(
             current_xyz[2],
             self.z_reference_mm,
             self.camera_elevation_deg,
         )
-        grip_lifted = self._bounded_view_point(grip_plane + depth_offset)
+        grip_lifted = grip_plane + depth_offset
         midpoint = QPointF((p1.x() + p2.x()) / 2, (p1.y() + p2.y()) / 2)
-        start = plane_transform.map(self._panel_corner(rect, str(corner)))
-        pull_offset = _limited_pull_offset(start, grip_plane)
-        total_offset = pull_offset + depth_offset
         raw_damage_grid = self._frame_grid("bottom_damage_frames")
-        damage_grid, lift_grid = _film_peel_fields(
+        damage_grid, _lift_grid = _film_peel_fields(
             raw_damage_grid,
             str(corner),
             peel,
         )
-        surface = _film_surface_grid(
-            rect,
-            damage_grid,
-            lift_grid,
-            pull_offset,
-            depth_offset,
+        # Display-only geometry: use the solver's current damage front as the
+        # root of a 180-degree fold.  This mesh never feeds back into mechanics.
+        visual_grip_xyz = (
+            (grip_base.x() - rect.left()) / max(rect.width(), 1.0e-9) * width_mm,
+            (rect.bottom() - grip_base.y()) / max(rect.height(), 1.0e-9) * height_mm,
+            current_xyz[2],
+        )
+        fold_world = _film_fold_world_grid(
+            width_mm,
+            height_mm,
+            raw_damage_grid or damage_grid,
+            str(corner),
+            visual_grip_xyz,
             peel,
+        )
+        surface = _project_film_fold_grid(
+            rect,
+            fold_world,
+            width_mm,
+            height_mm,
             plane_transform,
+            self.z_reference_mm,
+            self.camera_elevation_deg,
         )
 
         # Paint a single connected sheet. Every quadrilateral shares vertices
@@ -1438,7 +1551,7 @@ class PeelView(QWidget):
         # reference.  It is not the visible peel wave.  Draw the display front
         # from the exact same damage frame as the material tiles so the overlay
         # cannot diverge from the propagated interface state.
-        contour_segments = _damage_contour_segments(damage_grid)
+        contour_segments = _damage_contour_segments(raw_damage_grid or damage_grid)
         if contour_segments:
             shadow_pen = QPen(QColor(35, 20, 14, 150), 4.2)
             shadow_pen.setCapStyle(Qt.PenCapStyle.RoundCap)
@@ -1457,25 +1570,10 @@ class PeelView(QWidget):
                 )
                 base_start = plane_transform.map(base_start)
                 base_end = plane_transform.map(base_end)
-                display_start = base_start + total_offset * _sample_normalized_grid(
-                    lift_grid, normalized_start[0], normalized_start[1]
-                )
-                display_end = base_end + total_offset * _sample_normalized_grid(
-                    lift_grid, normalized_end[0], normalized_end[1]
-                )
-                average_front_offset = (display_start - base_start + display_end - base_end) * 0.5
-                if math.hypot(average_front_offset.x(), average_front_offset.y()) > 0.75:
-                    fold_color = QColor(COLORS["b"])
-                    fold_color.setAlpha(48)
-                    painter.setPen(Qt.PenStyle.NoPen)
-                    painter.setBrush(fold_color)
-                    painter.drawPolygon(
-                        QPolygonF([base_start, base_end, display_end, display_start])
-                    )
                 painter.setPen(shadow_pen)
-                painter.drawLine(display_start, display_end)
+                painter.drawLine(base_start, base_end)
                 painter.setPen(front_pen)
-                painter.drawLine(display_start, display_end)
+                painter.drawLine(base_start, base_end)
         elif not raw_damage_grid:
             # Compatibility only: legacy results do not contain damage frames.
             front_length = math.hypot(p2.x() - p1.x(), p2.y() - p1.y())

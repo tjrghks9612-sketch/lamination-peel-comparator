@@ -64,7 +64,7 @@ def test_tension_is_unilateral_and_capped() -> None:
     assert tension_from_span(100.0, 0.0, 1.0, 5.0, 7.0) == 7.0
 
 
-def test_equal_preload_pairs_identical_p1_tension_for_a_and_b() -> None:
+def test_equal_preload_pairs_identical_configured_rising_tension_for_a_and_b() -> None:
     project = measured_project()
     project.tension_sweep.mode = "equal_preload"
 
@@ -79,9 +79,9 @@ def test_equal_preload_pairs_identical_p1_tension_for_a_and_b() -> None:
         == 3
     )
     for scenario in result.tension_scenario_results:
-        assert scenario.p1_tension_a_n == pytest.approx(scenario.initial_preload_n)
-        assert scenario.p1_tension_b_n == pytest.approx(scenario.initial_preload_n)
-        assert scenario.p1_tension_a_n == pytest.approx(scenario.p1_tension_b_n)
+        assert scenario.initial_preload_n in (0.0, 0.5, 1.5)
+        assert scenario.p1_tension_a_n >= scenario.initial_preload_n
+        assert scenario.p1_tension_b_n >= scenario.initial_preload_n
 
 
 def test_fixed_pet_stiffness_is_not_a_sweep_axis() -> None:

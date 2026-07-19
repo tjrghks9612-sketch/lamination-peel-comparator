@@ -52,12 +52,16 @@ def test_measured_csv_exports_absolute_z_zero_speed_angle_and_force(tmp_path) ->
     path = export_comparison_csv(comparison, tmp_path / "measured.csv")
 
     with path.open(encoding="utf-8-sig", newline="") as stream:
-        first = next(csv.DictReader(stream))
+        rows = list(csv.DictReader(stream))
+    first = rows[0]
+    p1 = rows[comparison.result_a.main_trajectory_start_index]
 
-    assert float(first["grip_z_mm_a"]) == 4.0
-    assert float(first["grip_z_mm_b"]) == 14.0
+    assert float(first["grip_z_mm_a"]) == 0.0
+    assert float(first["grip_z_mm_b"]) == 0.0
     assert float(first["actual_speed_mm_s_a"]) == 0.0
     assert float(first["actual_speed_mm_s_b"]) == 0.0
-    assert float(first["peel_angle_deg_a"]) > 0.0
-    assert float(first["peel_angle_deg_b"]) > 0.0
-    assert float(first["force_z_n_a"]) != float(first["force_z_n_b"])
+    assert float(p1["grip_z_mm_a"]) == 4.0
+    assert float(p1["grip_z_mm_b"]) == 14.0
+    assert float(p1["peel_angle_deg_a"]) > 0.0
+    assert float(p1["peel_angle_deg_b"]) > 0.0
+    assert float(p1["force_z_n_a"]) != float(p1["force_z_n_b"])

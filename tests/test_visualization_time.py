@@ -122,13 +122,74 @@ def test_180_degree_fold_is_continuous_at_front_then_reverses_direction() -> Non
     rising = world[0][9][0]
     tail = world[0][6][0]
     anchor = world[0][0][0]
+    front_center = (50.0, 10.0)
+    direction = (
+        uncorrected_anchor[0] - front_center[0],
+        uncorrected_anchor[1] - front_center[1],
+    )
+    direction_length = math.hypot(*direction)
+    expected_attachment = (
+        uncorrected_anchor[0] - 10.0 * direction[0] / direction_length,
+        uncorrected_anchor[1] - 10.0 * direction[1] / direction_length,
+        uncorrected_anchor[2],
+    )
 
     assert front == pytest.approx((50.0, 0.0, 0.0))
     assert rising[0] < front[0]
     assert 0.0 < rising[2] < 2.0 * radius
     assert tail[0] > front[0]
     assert tail[2] == pytest.approx(2.0 * radius)
-    assert anchor == pytest.approx(uncorrected_anchor)
+    assert anchor == pytest.approx(expected_attachment)
+
+
+def test_fully_detached_u_shape_follows_head_as_one_rigid_mesh() -> None:
+    active_front = [[1.0] * 6 + [0.0] * 5 for _ in range(5)]
+    fully_detached = [[1.0] * 11 for _ in range(5)]
+    delta = (7.0, -3.0, 4.0)
+    reference = _film_fold_world_grid(
+        100.0,
+        40.0,
+        fully_detached,
+        "bottom_left",
+        (88.0, 30.0, 18.0),
+        1.0,
+        front_damage_grid=active_front,
+    )
+    followed = _film_fold_world_grid(
+        100.0,
+        40.0,
+        fully_detached,
+        "bottom_left",
+        (88.0, 30.0, 18.0),
+        1.0,
+        front_damage_grid=active_front,
+        follow_delta_xyz_mm=delta,
+    )
+
+    for reference_row, followed_row in zip(reference, followed):
+        for reference_vertex, followed_vertex in zip(reference_row, followed_row):
+            assert followed_vertex[0] == pytest.approx(
+                tuple(reference_vertex[0][axis] + delta[axis] for axis in range(3))
+            )
+
+
+def test_diagonal_tail_strips_share_one_head_direction_instead_of_fanning() -> None:
+    damage = [[1.0] * 5 + [0.5] + [0.0] * 5 for _ in range(11)]
+    world = _film_fold_world_grid(
+        100.0,
+        100.0,
+        damage,
+        "bottom_left",
+        (100.0, 100.0, 20.0),
+        0.0,
+        pull_tape_length_mm=0.0,
+    )
+    first = world[1][1][0]
+    second = world[2][2][0]
+
+    assert first[0] - second[0] == pytest.approx(10.0)
+    assert first[1] - second[1] == pytest.approx(10.0)
+    assert first[2] == pytest.approx(second[2])
 
 
 def test_diagonal_and_fully_detached_fold_remain_one_shared_mesh() -> None:

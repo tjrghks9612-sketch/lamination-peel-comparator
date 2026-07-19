@@ -204,7 +204,8 @@ class ConditionEditor(QWidget):
         helper_row = QHBoxLayout()
         helper = QLabel(
             "속도는 각 waypoint의 목표속도입니다. 포인트 사이에서 선형 보간하며 "
-            "P1=0은 정지 출발로 허용됩니다. Z는 패널 표면(Z=0) 기준 절대값입니다."
+            "P1=0은 수직 상승 후 정지로 허용됩니다. 헤드는 P1 XY의 Z=0에서 "
+            "테이프를 붙이고 P1 절대 Z까지 오른 뒤 P1→P2를 시작합니다."
         )
         helper.setWordWrap(True)
         helper.setProperty("dim", True)

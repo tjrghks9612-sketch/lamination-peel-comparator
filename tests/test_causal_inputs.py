@@ -105,13 +105,17 @@ def test_ten_mm_absolute_z_offset_changes_initial_angle_and_vertical_force() -> 
     low_result = simulate(low, AssumptionSet(), "coarse")
     high_result = simulate(high, AssumptionSet(), "coarse")
 
-    assert low_result.position_xyz_mm[0][2] == pytest.approx(4.0)
-    assert high_result.position_xyz_mm[0][2] == pytest.approx(14.0)
-    assert high_result.peel_angle_deg[0] != pytest.approx(
-        low_result.peel_angle_deg[0]
+    low_p1 = low_result.main_trajectory_start_index
+    high_p1 = high_result.main_trajectory_start_index
+    assert low_result.position_xyz_mm[0][2] == pytest.approx(0.0)
+    assert high_result.position_xyz_mm[0][2] == pytest.approx(0.0)
+    assert low_result.position_xyz_mm[low_p1][2] == pytest.approx(4.0)
+    assert high_result.position_xyz_mm[high_p1][2] == pytest.approx(14.0)
+    assert high_result.peel_angle_deg[high_p1] != pytest.approx(
+        low_result.peel_angle_deg[low_p1]
     )
-    assert high_result.force_xyz_n[0][2] != pytest.approx(
-        low_result.force_xyz_n[0][2]
+    assert high_result.force_xyz_n[high_p1][2] != pytest.approx(
+        low_result.force_xyz_n[low_p1][2]
     )
 
 

@@ -25,7 +25,7 @@ from .trajectory import interpolate_trajectory
 
 
 Resolution = Literal["coarse", "normal", "fine"]
-MODEL_VERSION = "cohesive-v6-visual-loads"
+MODEL_VERSION = "cohesive-v7-p1-lift"
 FloatArray = NDArray[np.float64]
 
 
@@ -37,7 +37,7 @@ class SimulationResult(BaseModel):
     condition_name: str
     resolution: Resolution
     input_hash: str
-    initial_state_mode: Literal["p1_equilibrium", "specified_approach"]
+    initial_state_mode: Literal["p1_attach_lift", "specified_approach"]
     main_trajectory_start_index: int
     trajectory_waypoint_indices: list[int]
 
@@ -361,7 +361,7 @@ def tension_from_span(
 
 
 def p1_span_length_mm(condition: Condition) -> float:
-    """Distance from the initially attached corner/front to the P1 gripper."""
+    """Distance from the initially attached corner/front to the raised P1 grip."""
 
     corner = _corner_coordinate(
         condition.panel.width_mm,
@@ -369,7 +369,12 @@ def p1_span_length_mm(condition: Condition) -> float:
         condition.pull_tape.start_corner,
     )
     p1 = condition.trajectory[0]
-    return float(np.linalg.norm(np.asarray((p1.x_mm, p1.y_mm, p1.z_mm)) - np.asarray((*corner, 0.0))))
+    return float(
+        np.linalg.norm(
+            np.asarray((p1.x_mm, p1.y_mm, p1.z_mm))
+            - np.asarray((*corner, 0.0))
+        )
+    )
 
 
 def _front_mechanics(
@@ -615,7 +620,7 @@ def _input_hash(
 
 
 def _command_series(condition: Condition, requested_steps: int):
-    """Build a fixed-per-segment, P1-referenced command history."""
+    """Build attachment, vertical P1 lift, and main waypoint histories."""
 
     main_segment_count = len(condition.trajectory) - 1
     quotient, remainder = divmod(requested_steps - 1, main_segment_count)
@@ -624,10 +629,33 @@ def _command_series(condition: Condition, requested_steps: int):
 
     approach = condition.initial_approach
     if approach is None:
-        combined_points = condition.trajectory
-        approach_segments = 0
-        all_intervals = main_intervals
-        initial_state_mode = "p1_equilibrium"
+        p1 = condition.trajectory[0]
+        if p1.z_mm > 1.0e-12:
+            lift_peak_speed = max(
+                p1.speed_mm_s,
+                condition.trajectory[1].speed_mm_s,
+            )
+            attachment = type(p1)(
+                x_mm=p1.x_mm,
+                y_mm=p1.y_mm,
+                z_mm=0.0,
+                speed_mm_s=0.0,
+            )
+            lift_midpoint = type(p1)(
+                x_mm=p1.x_mm,
+                y_mm=p1.y_mm,
+                z_mm=0.5 * p1.z_mm,
+                speed_mm_s=lift_peak_speed,
+            )
+            combined_points = [attachment, lift_midpoint, *condition.trajectory]
+            approach_segments = 2
+            approach_intervals = np.resize(main_intervals, approach_segments)
+            all_intervals = np.concatenate((approach_intervals, main_intervals))
+        else:
+            combined_points = condition.trajectory
+            approach_segments = 0
+            all_intervals = main_intervals
+        initial_state_mode = "p1_attach_lift"
     else:
         approach_segments = len(approach) - 1
         combined_points = [*approach[:-1], *condition.trajectory]
@@ -643,7 +671,11 @@ def _command_series(condition: Condition, requested_steps: int):
         approach_segments : approach_segments + len(condition.trajectory)
     ]
     main_start_index = int(main_waypoint_indices[0])
-    time_s = series.time_s - series.time_s[main_start_index]
+    time_s = (
+        series.time_s
+        if initial_state_mode == "p1_attach_lift"
+        else series.time_s - series.time_s[main_start_index]
+    )
     main_progress = np.clip(
         (series.path_parameter - approach_segments) / main_segment_count,
         0.0,
@@ -787,10 +819,9 @@ def simulate(
         cumulative_in_plane_travel += float(
             np.linalg.norm(gripper_increment[:2])
         )
-        # P1 is a held, tape-attached equilibrium state. Unknown pre-P1 motion
-        # is not inferred; only the selected preload exists at the zero-work
-        # first frame. max_pull_force_n is an equipment cap, not a permanent
-        # force source.
+        # The default history starts with tape attachment at P1 XY, Z=0.  Its
+        # vertical lift to P1 is real commanded motion, so endpoint-average
+        # actuator work can drive damage before the P1 waypoint is reached.
         available_force, _span = current_tension_and_span(bottom_damage, gripper)
         kinematic_mask = _film_reach_mask(
             local_x,
@@ -1061,7 +1092,7 @@ def simulate(
         "이 결과는 보정 전 상대 비교용 축약 모델이며 실제 불량률 또는 안전 판정이 아닙니다.",
         "하면 박리는 노드별 에너지·일·연결성 기준, 상면은 손상 연성 Winkler 기초로 근사합니다.",
         "gf 시험 폭·각도·속도와 장력-신장 가정을 실제 계측값으로 보정해야 합니다.",
-        "Z는 패널 표면 Z=0 기준 절대 좌표이며 P1은 테이프 부착 후 정적 평형으로 해석합니다.",
+        "P1 XY의 Z=0에서 테이프를 부착한 뒤 P1 절대 Z까지 수직 상승하고 본 궤적을 시작합니다.",
     ]
     if not bool(np.all(bottom_converged)):
         warnings.append("일부 시간 단계에서 하면 손상 전파가 설정된 최대 반복 횟수에 도달했습니다.")

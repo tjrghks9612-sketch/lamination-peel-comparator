@@ -165,6 +165,10 @@ class Condition(_StrictModel):
 
     @model_validator(mode="after")
     def _approach_joins_p1(self) -> "Condition":
+        if self.trajectory[0].z_mm < 0.0:
+            raise ValueError(
+                "main trajectory P1 Z must be at or above the panel surface (Z=0)"
+            )
         if self.initial_approach is None:
             return self
         endpoint = self.initial_approach[-1]

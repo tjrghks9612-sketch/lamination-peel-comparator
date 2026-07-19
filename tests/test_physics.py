@@ -5,7 +5,7 @@ import pytest
 
 from lamination_sim.comparison import compare
 from lamination_sim.models import AssumptionSet, SweepLevel, TensionCase
-from lamination_sim.presets import default_condition, default_project
+from lamination_sim.presets import default_condition, default_project, measured_project
 from lamination_sim.simulation import (
     _actuator_work_n_mm,
     _film_reach_mask,
@@ -159,19 +159,38 @@ def test_thicker_panel_reduces_lift() -> None:
     assert thick_result.max_panel_lift_mm < thin_result.max_panel_lift_mm
 
 
-def test_p1_static_equilibrium_loads_panel_without_advancing_bottom_damage() -> None:
-    condition = default_condition()
-    for point in condition.trajectory:
-        point.z_mm += 4.0
-
+def test_p1_surface_attachment_lifts_vertically_before_main_trajectory() -> None:
+    condition = measured_project().condition_b
     result = simulate(condition, AssumptionSet(), "coarse")
+    p1_index = result.main_trajectory_start_index
 
-    assert result.initial_state_mode == "p1_equilibrium"
+    assert result.initial_state_mode == "p1_attach_lift"
     assert result.time_s[0] == pytest.approx(0.0)
-    assert result.speed_mm_s[0] == pytest.approx(condition.trajectory[0].speed_mm_s)
-    assert result.force_resultant_n[0] > 0.0
-    assert result.peel_angle_deg[0] > 0.0
-    assert result.bottom_peel_ratio[0] == pytest.approx(0.0)
+    assert p1_index > 0
+    assert result.position_xyz_mm[0] == pytest.approx(
+        [condition.trajectory[0].x_mm, condition.trajectory[0].y_mm, 0.0]
+    )
+    assert result.position_xyz_mm[p1_index] == pytest.approx(
+        [
+            condition.trajectory[0].x_mm,
+            condition.trajectory[0].y_mm,
+            condition.trajectory[0].z_mm,
+        ]
+    )
+    assert all(
+        point[:2] == pytest.approx(result.position_xyz_mm[0][:2])
+        for point in result.position_xyz_mm[: p1_index + 1]
+    )
+    assert all(
+        left <= right + 1.0e-12
+        for left, right in zip(
+            (point[2] for point in result.position_xyz_mm[:p1_index]),
+            (point[2] for point in result.position_xyz_mm[1 : p1_index + 1]),
+        )
+    )
+    assert result.peel_work_n_mm[p1_index] > 0.0
+    assert result.tension_n[0] == pytest.approx(0.0)
+    assert result.tension_n[p1_index] > result.initial_preload_n
 
 
 def test_left_right_mirror_has_symmetric_scalar_results() -> None:

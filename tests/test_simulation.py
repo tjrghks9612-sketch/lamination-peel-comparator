@@ -30,6 +30,14 @@ def test_condition_requires_exactly_six_distinct_points() -> None:
         type(condition).model_validate(data)
 
 
+def test_condition_rejects_p1_below_attachment_surface() -> None:
+    data = default_condition().model_dump()
+    data["trajectory"][0]["z_mm"] = -0.1
+
+    with pytest.raises(ValidationError, match="P1 Z must be at or above"):
+        type(default_condition()).model_validate(data)
+
+
 def test_packaged_self_test_accepts_default_tension_sweep() -> None:
     assert _self_test() == 0
 
@@ -99,13 +107,17 @@ def test_absolute_p1_height_changes_initial_equilibrium() -> None:
     low_result = simulate(low, AssumptionSet(), "coarse")
     high_result = simulate(high, AssumptionSet(), "coarse")
 
-    assert low_result.position_xyz_mm[0][2] == pytest.approx(4.0)
-    assert high_result.position_xyz_mm[0][2] == pytest.approx(14.0)
-    assert high_result.peel_angle_deg[0] != pytest.approx(
-        low_result.peel_angle_deg[0]
+    low_p1 = low_result.main_trajectory_start_index
+    high_p1 = high_result.main_trajectory_start_index
+    assert low_result.position_xyz_mm[0][2] == pytest.approx(0.0)
+    assert high_result.position_xyz_mm[0][2] == pytest.approx(0.0)
+    assert low_result.position_xyz_mm[low_p1][2] == pytest.approx(4.0)
+    assert high_result.position_xyz_mm[high_p1][2] == pytest.approx(14.0)
+    assert high_result.peel_angle_deg[high_p1] != pytest.approx(
+        low_result.peel_angle_deg[low_p1]
     )
-    assert high_result.force_xyz_n[0][2] != pytest.approx(
-        low_result.force_xyz_n[0][2]
+    assert high_result.force_xyz_n[high_p1][2] != pytest.approx(
+        low_result.force_xyz_n[low_p1][2]
     )
 
 
